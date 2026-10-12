@@ -74,11 +74,13 @@ class PackagePluginTest(unittest.TestCase):
     def test_archive_contains_templates_and_resources_but_no_private_files(self) -> None:
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.write(str(self.plugin / "config/sources.local.env"))
+        self.write("assets/readme/demo.png", "synthetic screenshot fixture")
         output = Path("output/test.zip")
         package_plugin.build_archive(self.plugin, output, "test-bundle")
         with zipfile.ZipFile(self.root / output) as archive:
             names = archive.namelist()
         self.assertIn("test-bundle/.env.example", names)
+        self.assertIn("test-bundle/assets/readme/demo.png", names)
         self.assertIn(f"test-bundle/{self.plugin}/skills/example/SKILL.md", names)
         self.assertFalse(any(name.endswith("sources.local.env") for name in names))
 
