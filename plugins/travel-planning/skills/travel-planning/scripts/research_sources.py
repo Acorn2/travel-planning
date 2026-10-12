@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -36,7 +38,9 @@ from source_adapters import (  # noqa: E402
     provider_command,
     run_json_cli,
 )
-from research_workspace import WorkspaceError, store_source_snapshot  # noqa: E402
+from research_workspace import INVENTORY_PRODUCTS_BY_DOMAIN, WorkspaceError, read_json as read_workspace_json, store_source_snapshot  # noqa: E402
+import execution_log  # noqa: E402
+from xhs_images import cache_images, prepare_images  # noqa: E402
 from scripts.providers.amap_mcp import (  # noqa: E402
     command as amap_mcp_command,
     load_config as load_amap_environment,
@@ -85,6 +89,98 @@ PREFLIGHT_SOURCES = (
     "open-meteo",
     "xiaohongshu",
 )
+
+SOURCE_REVISION = hashlib.sha256(Path(__file__).read_bytes() +
+    Path(execution_log.__file__).read_bytes() + (SCRIPTS_DIR / "source_adapters.py").read_bytes()).hexdigest()
+QUERY_PHASES = {
+    "preflight": "preflight", "xhs-health": "preflight", "xhs-images": "research",
+    "weather": "weather", "amap-place": "research", "amap-route": "transport",
+    "osm-place": "research", "xhs-search": "research", "xhs-detail": "research",
+    "xhs-login-status": "preflight",
+}
+
+
+def source_context(source_id: str | None) -> dict[str, Any]:
+    if source_id == "xiaohongshu":
+        endpoint = urlparse(xhs_mcp_url())
+        # Connection identity excludes auth, query and fragment.
+        return {"host": endpoint.hostname, "port": endpoint.port, "path": endpoint.path}
+    if source_id == "amap-maps":
+        return {"transport": "mcp_stdio"}
+    return {"source": source_id}
+
+
+def health_key(source_id: str) -> str:
+    return execution_log.fingerprint({"category": "health", "source": source_id,
+                                      "revision": SOURCE_REVISION, "context": source_context(source_id)})
+
+
+def query_phase(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "phase", None)
+    if explicit:
+        return explicit
+    command = getattr(args, "command", "query")
+    if command.startswith(("flyai-", "variflight-")):
+        return "lodging" if command == "flyai-hotel" else "transport"
+    return QUERY_PHASES.get(command, "research")
+
+
+def run_query(args: argparse.Namespace, tool: str, parameters: dict[str, Any], callback: Any,
+              source_id: str | None = None, reuse_key: str | None = None,
+              prove_health: bool = False) -> dict[str, Any]:
+    workspace = getattr(args, "workspace", None)
+    if not workspace:
+        return callback()
+    root = execution_log.workspace_root(workspace)
+    key = reuse_key or execution_log.fingerprint({"tool": tool, "parameters": parameters,
+        "revision": SOURCE_REVISION, "context": source_context(source_id)})
+    metadata: dict[str, Any] = {}
+    call_started = time.monotonic()
+    operation = re.sub(r"[^a-z0-9_-]+", "-", tool.casefold()).strip("-")[:64] or "query"
+    with execution_log.measured(root, query_phase(args), operation, "query", getattr(args, "task_id", None)) as entry:
+        entry["query_key"] = key
+        with execution_log.query_lock(root / "state/execution/locks" / f"{key}.lock"):
+            record = None if getattr(args, "refresh", False) else execution_log.cached_result(root, key)
+            if record:
+                payload = record["payload"]
+                entry["mode"] = "reused"
+                metadata = {"mode": "reused", "query_key": key, "expires_at": record["expires_at"]}
+            else:
+                entry["mode"] = "fresh"
+                started = time.monotonic()
+                try:
+                    payload = callback()
+                except BaseException:
+                    # Preserve archived evidence, but invalidate the memo/proof after a failed refresh.
+                    execution_log.write_json(root / "state/execution/cache" / f"{key}.json", {"key": key, "invalidated_at": execution_log.stamp()})
+                    if source_id:
+                        execution_log.write_json(root / "state/execution/cache" / f"{health_key(source_id)}.json", {"invalidated_at": execution_log.stamp()})
+                    raise
+                execution_log.write_json(root / "state/execution/cache" / f"{key}.json", {"key": key, "invalidated_at": execution_log.stamp()})
+                execution_log.store_result(root, key, payload)
+                metadata = {"mode": "fresh", "query_key": key}
+                if prove_health and source_id and payload.get("status") in {"platform_reported", "community_reported", "no_results"}:
+                    captured = (payload.get("freshness") or {}).get("checked_at") or payload.get("checked_at")
+                    proof = {"status": "ready", "source_id": source_id, "scope": "observed_operation",
+                             "operation": tool, "checked_at": captured,
+                             "latency_ms": round((time.monotonic() - started) * 1000)}
+                    execution_log.store_result(root, health_key(source_id), proof)
+                if payload.get("status") in {"error", "unavailable", "login_required"}:
+                    entry["status"] = "failed"
+                    if source_id:
+                        execution_log.write_json(root / "state/execution/cache" / f"{health_key(source_id)}.json", {"invalidated_at": execution_log.stamp()})
+            captured = (payload.get("freshness") or {}).get("checked_at") or payload.get("checked_at")
+            metadata["original_checked_at"] = captured
+            if execution_log.empty_result(payload):
+                entry["status"] = "no_results"
+    metadata["elapsed_ms"] = round((time.monotonic() - call_started) * 1000)
+    args._execution = metadata
+    return payload
+
+
+def command_parameters(args: argparse.Namespace) -> dict[str, Any]:
+    excluded = {"handler", "command", "workspace", "task_id", "phase", "refresh", "timeout", "consent_external_data"}
+    return {key: value for key, value in vars(args).items() if key not in excluded and not key.startswith("_")}
 
 WEATHER_CODES = {
     0: "晴",
@@ -484,6 +580,19 @@ def xhs_login_status(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def require_xhs_login(timeout: int = 60, query_args: argparse.Namespace | None = None) -> None:
+    login_args = argparse.Namespace(timeout=timeout, workspace=getattr(query_args, "workspace", None),
+        phase=getattr(query_args, "phase", None) or "preflight", task_id=getattr(query_args, "task_id", None),
+        refresh=getattr(query_args, "refresh", False))
+    session = run_query(login_args, "check-login-status", {}, lambda: xhs_login_status(login_args),
+                        "xiaohongshu", reuse_key=health_key("xiaohongshu"))
+    if session.get("status") not in {"authenticated", "ready"}:
+        raise AdapterError(
+            "login_required",
+            "小红书当前未登录，请先执行 setup.py login 完成扫码，再启动 MCP 服务",
+        )
+
+
 def normalize_xhs_mcp_feed(feed: dict[str, Any]) -> dict[str, Any]:
     note = feed.get("noteCard") or {}
     user = note.get("user") or {}
@@ -511,7 +620,602 @@ def xhs_excerpt(value: Any, limit: int = 320) -> str | None:
     return clean if len(clean) <= limit else clean[:limit].rstrip() + "…"
 
 
+def xhs_first_value(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if mapping.get(key) not in (None, ""):
+            return mapping[key]
+    return None
+
+
+def xhs_comment_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+    for key in ("comments", "commentList", "comment_list", "items"):
+        items = value.get(key)
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def normalize_xhs_comment(
+    comment: dict[str, Any],
+    include_replies: bool = False,
+) -> dict[str, Any]:
+    user = (
+        comment.get("user")
+        or comment.get("userInfo")
+        or comment.get("user_info")
+        or {}
+    )
+    if not isinstance(user, dict):
+        user = {}
+    replies = xhs_comment_items(
+        xhs_first_value(comment, "subComments", "sub_comments", "replies", "replyList")
+    )
+    normalized = {
+        "comment_id": xhs_first_value(comment, "id", "commentId", "comment_id"),
+        "author": xhs_first_value(user, "nickname", "nickName", "name"),
+        "content": xhs_excerpt(
+            xhs_first_value(comment, "content", "text", "commentContent"),
+            limit=500,
+        ),
+        "published_at": unix_time(
+            xhs_first_value(comment, "createTime", "create_time", "time", "timestamp")
+        ),
+        "likes": xhs_first_value(comment, "likeCount", "like_count", "likedCount"),
+        "reply_count": xhs_first_value(
+            comment,
+            "subCommentCount",
+            "sub_comment_count",
+            "replyCount",
+            "reply_count",
+        ),
+    }
+    if include_replies:
+        normalized["replies"] = [
+            normalize_xhs_comment(reply, include_replies=False)
+            for reply in replies
+        ]
+    return normalized
+
+
+def normalize_xhs_comments(
+    detail: dict[str, Any],
+    include_replies: bool = False,
+) -> list[dict[str, Any]]:
+    comments = xhs_comment_items(
+        xhs_first_value(detail, "comments", "commentList", "comment_list")
+    )
+    if not comments:
+        note = detail.get("note") or {}
+        if isinstance(note, dict):
+            comments = xhs_comment_items(
+                xhs_first_value(note, "comments", "commentList", "comment_list")
+            )
+    return [
+        normalize_xhs_comment(comment, include_replies=include_replies)
+        for comment in comments
+    ]
+
+
+XHS_COMMENT_TOPIC_RULES = (
+    ("推广或疑似广告", r"广告|推广|合作|团购|带货|私信|优惠券|扫码|加微信|代购"),
+    ("开放、施工与搬迁", r"施工|维修|修路|围挡|封路|关闭|封闭|搬迁|开放时间|停止入场|恢复开放"),
+    ("预约、购票与检票", r"预约|门票|购票|检票|取票|身份证|实名|预约满"),
+    ("价格", r"票价|价格|人均|收费|免费|花了|花费|贵|便宜|元|¥|￥"),
+    ("交通与停车", r"停车|停车场|地铁|公交|打车|出租|自驾|接驳|换乘|堵车|班车"),
+    ("入口与路线", r"东门|西门|南门|北门|入口|出口|路线|步行|爬坡|台阶|绕行"),
+    ("排队与拥挤", r"排队|拥挤|人多|人少|空旷|等候|等了|排了|分钟"),
+    ("天气影响", r"下雨|下雪|大风|天气|暴晒|日落|日出|雾|能见度|积水"),
+    ("餐厅口味与服务", r"好吃|难吃|口味|味道|份量|分量|出餐|座位|服务|排队吃饭|人均"),
+    ("老人、儿童与无障碍", r"老人|老年人|孩子|儿童|婴儿车|轮椅|无障碍|推车|亲子"),
+    ("安全与风险", r"危险|不安全|小心|落石|打滑|防滑|事故|急救|高反|警察"),
+)
+XHS_COMMENT_DEFAULT_TOPIC = "其他"
+XHS_COMMENT_RECHECK_TOPICS = frozenset(
+    {
+        "开放、施工与搬迁",
+        "预约、购票与检票",
+        "价格",
+        "交通与停车",
+        "排队与拥挤",
+        "天气影响",
+        "老人、儿童与无障碍",
+        "安全与风险",
+        "入口与路线",
+    }
+)
+XHS_COMMENT_ANCHOR_PATTERNS = (
+    ("东门", r"东门"),
+    ("西门", r"西门"),
+    ("南门", r"南门"),
+    ("北门", r"北门"),
+    ("入口", r"入口|进门"),
+    ("出口", r"出口|出门"),
+    ("施工", r"施工|维修|修路|围挡|封路"),
+    ("开放", r"开放|恢复|通行"),
+    ("关闭", r"关闭|封闭|不能进|不让进"),
+    ("预约", r"预约|实名"),
+    ("门票", r"门票|票价|购票|检票"),
+    ("停车", r"停车|停车场"),
+    ("公共交通", r"地铁|公交|打车|出租|接驳|换乘"),
+    ("排队", r"排队|拥挤|等候|等了|排了"),
+    ("人少", r"人少|空旷|不挤"),
+    ("人多", r"人多|拥挤|很挤"),
+    ("餐饮", r"餐厅|吃饭|口味|味道|份量|分量|出餐|座位|服务"),
+    ("天气", r"下雨|下雪|大风|暴晒|日落|日出|雾|积水"),
+    ("无障碍", r"老人|孩子|儿童|婴儿车|轮椅|无障碍|推车"),
+)
+
+
+def _xhs_numeric_value(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(万|千|k)?", text, re.IGNORECASE)
+    if not match:
+        return 0.0
+    number = float(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit == "万":
+        number *= 10000
+    elif unit in {"千", "k"}:
+        number *= 1000
+    return number
+
+
+def _xhs_comment_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)) or (
+        isinstance(value, str) and value.strip().isdigit()
+    ):
+        timestamp = _xhs_numeric_value(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            parsed = datetime.fromtimestamp(timestamp).astimezone()
+        except (OSError, OverflowError, ValueError):
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.strptime(text, "%Y-%m-%d")
+            except ValueError:
+                return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
+
+
+def _xhs_comment_text(comment: dict[str, Any]) -> str:
+    return str(comment.get("content") or "").strip()
+
+
+def classify_xhs_comment_topic(content: Any) -> str:
+    """Assign one conservative travel-research topic to a comment."""
+    text = str(content or "").strip()
+    if not text:
+        return XHS_COMMENT_DEFAULT_TOPIC
+    for topic, pattern in XHS_COMMENT_TOPIC_RULES:
+        if re.search(pattern, text, re.IGNORECASE):
+            return topic
+    return XHS_COMMENT_DEFAULT_TOPIC
+
+
+def _xhs_comment_anchors(content: Any) -> set[str]:
+    text = str(content or "").strip()
+    return {
+        anchor
+        for anchor, pattern in XHS_COMMENT_ANCHOR_PATTERNS
+        if re.search(pattern, text, re.IGNORECASE)
+    }
+
+
+def score_xhs_comment(
+    comment: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Score comment usefulness without treating popularity as truth."""
+    text = _xhs_comment_text(comment)
+    topic = classify_xhs_comment_topic(text)
+    current = (now or datetime.now().astimezone()).astimezone()
+    published = _xhs_comment_datetime(comment.get("published_at"))
+    reasons: list[str] = []
+    flags: list[str] = []
+
+    relevance = 30 if topic != XHS_COMMENT_DEFAULT_TOPIC else 5
+    if relevance == 30:
+        reasons.append("命中旅行决策主题")
+    else:
+        flags.append("主题不明确")
+
+    recency = 0
+    if published:
+        age_days = max(0.0, (current - published).total_seconds() / 86400)
+        if age_days <= 7:
+            recency = 25
+        elif age_days <= 30:
+            recency = 20
+        elif age_days <= 90:
+            recency = 14
+        elif age_days <= 180:
+            recency = 8
+        else:
+            recency = 3
+        reasons.append(f"发布时间距今约{int(age_days)}天")
+    else:
+        flags.append("缺少可解析发布时间")
+
+    specificity_markers = (
+        (r"\d", "包含数字或时长"),
+        (r"\d{1,2}月|\d{1,2}日|昨天|今天|本周|周末|工作日|早上|晚上", "包含具体时间"),
+        (r"东门|西门|南门|北门|入口|出口|停车场|地铁|公交|餐厅|景区", "包含具体地点或对象"),
+        (r"建议|最好|需要|必须|不要|可以|实际|现场|到了|进场|离开", "包含可执行动作"),
+    )
+    specificity_hits = sum(bool(re.search(pattern, text)) for pattern, _ in specificity_markers)
+    specificity = min(20, specificity_hits * 5)
+    reasons.extend(label for pattern, label in specificity_markers if re.search(pattern, text))
+    if specificity == 0:
+        flags.append("缺少具体事实")
+
+    firsthand = 0
+    if re.search(r"我|我们|亲测|实测|现场|刚去|去过|到过|当天|这次", text):
+        firsthand = 15
+        reasons.append("有亲历或现场信号")
+    elif re.search(r"看到|听说|朋友|据说", text):
+        firsthand = 5
+        flags.append("亲历程度较弱")
+    else:
+        flags.append("缺少亲历信号")
+
+    likes = _xhs_numeric_value(comment.get("likes"))
+    replies = _xhs_numeric_value(comment.get("reply_count"))
+    engagement = min(6, int(math.log10(likes + 1) * 3))
+    engagement += min(4, int(math.log10(replies + 1) * 3))
+    if engagement:
+        reasons.append("有互动反馈")
+
+    is_question = bool(
+        re.search(r"请问|求问|想问|有人知道|有没有人|怎么去|多少钱啊|？|\?", text)
+    )
+    is_promotion = topic == "推广或疑似广告"
+    is_generic = bool(
+        len(text) <= 18
+        and not specificity_hits
+        and not re.search(r"我|我们|亲测|实测|现场", text)
+    )
+    if is_question:
+        flags.append("求问型评论")
+    if is_promotion:
+        flags.append("推广或疑似广告")
+    if is_generic:
+        flags.append("泛泛表达")
+
+    penalty = (12 if is_question else 0) + (20 if is_promotion else 0) + (10 if is_generic else 0)
+    score = max(0, min(100, relevance + recency + specificity + firsthand + engagement - penalty))
+    eligible = score >= 40 and not is_question and not is_promotion and not is_generic
+    return {
+        "topic": topic,
+        "score": score,
+        "eligible": eligible,
+        "reasons": reasons,
+        "flags": flags,
+        "published": published,
+        "likes": likes,
+        "reply_count": replies,
+        "anchors": sorted(_xhs_comment_anchors(text)),
+    }
+
+
+def _flatten_xhs_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        flattened.append(comment)
+        for reply in comment.get("replies") or []:
+            if isinstance(reply, dict):
+                child = dict(reply)
+                child["_parent_comment_id"] = comment.get("comment_id")
+                flattened.append(child)
+    return flattened
+
+
+def _xhs_comment_sort_key(
+    item: tuple[dict[str, Any], dict[str, Any]],
+) -> tuple[int, float, float, float]:
+    comment, analysis = item
+    published = analysis.get("published")
+    timestamp = published.timestamp() if isinstance(published, datetime) else 0.0
+    return (
+        int(analysis.get("score", 0)),
+        timestamp,
+        float(analysis.get("likes", 0)),
+        float(analysis.get("reply_count", 0)),
+    )
+
+
+def group_xhs_comment_signals(
+    comments: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Group eligible comments that describe the same concrete signal."""
+    analyzed: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for comment in _flatten_xhs_comments(comments):
+        analysis = score_xhs_comment(comment, now=now)
+        if analysis["eligible"]:
+            analyzed.append((comment, analysis))
+    analyzed.sort(key=_xhs_comment_sort_key, reverse=True)
+
+    groups: list[dict[str, Any]] = []
+    for comment, analysis in analyzed:
+        anchors = set(analysis["anchors"])
+        normalized_text = re.sub(r"\W+", "", _xhs_comment_text(comment)).lower()
+        selected: dict[str, Any] | None = None
+        for group in groups:
+            if group["topic"] != analysis["topic"]:
+                continue
+            if anchors and anchors.intersection(group["anchors"]):
+                selected = group
+                break
+            if normalized_text and normalized_text == group["normalized_text"]:
+                selected = group
+                break
+        if selected is None:
+            selected = {
+                "group_id": f"comment-group-{len(groups) + 1}",
+                "topic": analysis["topic"],
+                "anchors": set(anchors),
+                "normalized_text": normalized_text,
+                "content_signatures": set(),
+                "comments": [],
+            }
+            groups.append(selected)
+        analysis = dict(analysis)
+        analysis["duplicate"] = normalized_text in selected["content_signatures"]
+        selected["content_signatures"].add(normalized_text)
+        selected["comments"].append((comment, analysis))
+        selected["anchors"].update(anchors)
+    return groups
+
+
+def _xhs_contains_any(text: str, patterns: tuple[str, ...]) -> bool:
+    if isinstance(patterns, str):
+        patterns = (patterns,)
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _xhs_numbers_with_unit(text: str) -> list[float]:
+    values: list[float] = []
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(分钟|小时|元|块|公里|km|万)?", text, re.IGNORECASE):
+        value = float(match.group(1))
+        if match.group(2) in {"小时"}:
+            value *= 60
+        elif match.group(2) in {"公里", "km"}:
+            value *= 1000
+        values.append(value)
+    return values
+
+
+def _xhs_conflict_reason(topic: str, left: str, right: str) -> str | None:
+    positive = {
+        "开放": (r"开放|正常进|恢复|可以进|能进|已通行"),
+        "需要预约": (r"需要预约|必须预约|要预约|建议预约"),
+        "拥挤": (r"排队|拥挤|人多|很挤|等了"),
+        "贵": (r"贵|涨价|不便宜"),
+    }
+    negative = {
+        "开放": (r"关闭|封闭|施工|不能进|不让进|封路"),
+        "需要预约": (r"无需预约|不用预约|不需要预约|免预约"),
+        "拥挤": (r"不排队|人少|空旷|不用等"),
+        "贵": (r"便宜|免费|不贵"),
+    }
+    if topic == "开放、施工与搬迁":
+        if (_xhs_contains_any(left, positive["开放"]) and _xhs_contains_any(right, negative["开放"])) or (
+            _xhs_contains_any(right, positive["开放"]) and _xhs_contains_any(left, negative["开放"])
+        ):
+            return "同一主题同时出现开放与关闭/施工表述"
+    if topic == "预约、购票与检票":
+        if (_xhs_contains_any(left, positive["需要预约"]) and _xhs_contains_any(right, negative["需要预约"])) or (
+            _xhs_contains_any(right, positive["需要预约"]) and _xhs_contains_any(left, negative["需要预约"])
+        ):
+            return "同一主题同时出现需要预约与无需预约表述"
+    if topic == "排队与拥挤":
+        if (_xhs_contains_any(left, positive["拥挤"]) and _xhs_contains_any(right, negative["拥挤"])) or (
+            _xhs_contains_any(right, positive["拥挤"]) and _xhs_contains_any(left, negative["拥挤"])
+        ):
+            return "同一主题同时出现拥挤与不拥挤表述"
+    if topic == "价格":
+        left_values = _xhs_numbers_with_unit(left)
+        right_values = _xhs_numbers_with_unit(right)
+        if left_values and right_values:
+            left_value = max(left_values)
+            right_value = max(right_values)
+            if max(left_value, right_value) and abs(left_value - right_value) / max(left_value, right_value) >= 0.2:
+                return "同一主题出现明显不同的价格或费用"
+    if topic == "入口与路线":
+        left_entries = set(re.findall(r"[东南西北]门", left))
+        right_entries = set(re.findall(r"[东南西北]门", right))
+        recommendation = r"建议|最好|从.+进|从.+走|优先"
+        if left_entries and right_entries and left_entries.isdisjoint(right_entries):
+            if re.search(recommendation, left) and re.search(recommendation, right):
+                return "同一主题出现不同入口或路线建议"
+    return None
+
+
+def detect_xhs_comment_conflicts(
+    groups: list[dict[str, Any]],
+    comments: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Find explicit or material disagreements between grouped signals."""
+    conflicts: list[dict[str, Any]] = []
+    for group in groups:
+        for index, (left_comment, _) in enumerate(group["comments"]):
+            for right_comment, _ in group["comments"][index + 1 :]:
+                reason = _xhs_conflict_reason(
+                    group["topic"],
+                    _xhs_comment_text(left_comment),
+                    _xhs_comment_text(right_comment),
+                )
+                if reason:
+                    conflicts.append(
+                        {
+                            "topic": group["topic"],
+                            "left_group_id": group["group_id"],
+                            "right_group_id": group["group_id"],
+                            "reason": reason,
+                        }
+                    )
+    for index, left_group in enumerate(groups):
+        left_texts = [_xhs_comment_text(comment) for comment, _ in left_group["comments"]]
+        left_text = " ".join(left_texts)
+        for right_group in groups[index + 1 :]:
+            if left_group["topic"] != right_group["topic"]:
+                continue
+            right_text = " ".join(
+                _xhs_comment_text(comment) for comment, _ in right_group["comments"]
+            )
+            reason = _xhs_conflict_reason(left_group["topic"], left_text, right_text)
+            if reason:
+                conflicts.append(
+                    {
+                        "topic": left_group["topic"],
+                        "left_group_id": left_group["group_id"],
+                        "right_group_id": right_group["group_id"],
+                        "reason": reason,
+                    }
+                )
+    return conflicts
+
+
+def build_xhs_comment_insights(
+    comments: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build the compact evidence layer consumed by travel planning."""
+    flattened = _flatten_xhs_comments(comments)
+    groups = group_xhs_comment_signals(flattened, now=now)
+    conflicts = detect_xhs_comment_conflicts(groups, comments=flattened)
+    conflict_counts: dict[str, int] = {}
+    for conflict in conflicts:
+        for group_id in {conflict["left_group_id"], conflict["right_group_id"]}:
+            conflict_counts[group_id] = conflict_counts.get(group_id, 0) + 1
+
+    insights: list[dict[str, Any]] = []
+    duplicate_count = 0
+    for group in groups:
+        duplicate_count += sum(
+            bool(analysis.get("duplicate"))
+            for _, analysis in group["comments"]
+        )
+        ranked = sorted(
+            (
+                (comment, analysis)
+                for comment, analysis in group["comments"]
+                if not analysis.get("duplicate")
+            ),
+            key=_xhs_comment_sort_key,
+            reverse=True,
+        )
+        if not ranked:
+            continue
+        best_comment, best_analysis = ranked[0]
+        conflict_count = conflict_counts.get(group["group_id"], 0)
+        needs_recheck = group["topic"] in XHS_COMMENT_RECHECK_TOPICS or conflict_count > 0
+        if conflict_count:
+            confidence = "low"
+            recheck_reason = "评论存在相互冲突的表述"
+        elif len(ranked) >= 2:
+            confidence = "medium"
+            recheck_reason = "社区评论只能提供近期体验信号"
+        else:
+            confidence = "low"
+            recheck_reason = "只有单条合格评论支持"
+        evidence = [
+            {
+                "comment_id": comment.get("comment_id"),
+                "author": comment.get("author"),
+                "published_at": comment.get("published_at"),
+                "likes": comment.get("likes"),
+                "reply_count": comment.get("reply_count"),
+                "value_score": analysis["score"],
+                "excerpt": xhs_excerpt(_xhs_comment_text(comment), limit=180),
+            }
+            for comment, analysis in ranked[:5]
+        ]
+        published_dates = [
+            analysis["published"]
+            for _, analysis in ranked
+            if isinstance(analysis.get("published"), datetime)
+        ]
+        latest = max(published_dates).isoformat(timespec="seconds") if published_dates else None
+        insights.append(
+            {
+                "insight_id": group["group_id"],
+                "topic": group["topic"],
+                "claim": _xhs_comment_text(best_comment),
+                "latest_evidence_at": latest,
+                "support_count": len(ranked),
+                "contradiction_count": conflict_count,
+                "confidence": confidence,
+                "needs_official_recheck": needs_recheck,
+                "recheck_reason": recheck_reason if needs_recheck else None,
+                "evidence": evidence,
+            }
+        )
+
+    insights.sort(
+        key=lambda insight: (
+            insight["confidence"] == "medium",
+            insight["support_count"],
+            insight["latest_evidence_at"] or "",
+        ),
+        reverse=True,
+    )
+    needs_recheck = [
+        {
+            "insight_id": insight["insight_id"],
+            "topic": insight["topic"],
+            "claim": insight["claim"],
+            "reason": insight["recheck_reason"],
+        }
+        for insight in insights
+        if insight["needs_official_recheck"]
+    ]
+    eligible_count = sum(
+        1
+        for group in groups
+        for _, analysis in group["comments"]
+        if not analysis.get("duplicate")
+    )
+    return {
+        "comment_insights": insights,
+        "needs_recheck": needs_recheck,
+        "comment_analysis": {
+            "input_count": len(flattened),
+            "eligible_count": eligible_count,
+            "filtered_count": len(flattened) - eligible_count,
+            "duplicate_count": duplicate_count,
+            "group_count": len(insights),
+            "scoring": "相关性30% + 时效性25% + 具体程度20% + 亲历信号15% + 互动10%；互动不代表真实性",
+        },
+    }
+
+
 def xhs_search(args: argparse.Namespace) -> dict[str, Any]:
+    require_xhs_login(query_args=args)
     value_map = {
         "sort_by": {
             "relevance": "综合", "latest": "最新", "most_liked": "最多点赞",
@@ -566,16 +1270,36 @@ def xhs_search(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
+    require_xhs_login(query_args=args)
     cached = read_xhs_mcp_token_cache().get("notes", {}).get(args.note_id)
     if not cached or not cached.get("xsec_token"):
         raise SourceError("未找到该笔记的临时访问令牌；请先用 xhs-search 搜索，再读取详情")
+    all_comments = bool(getattr(args, "all_comments", False))
+    include_replies = bool(getattr(args, "include_replies", False)) and all_comments
+    comment_limit = getattr(args, "comment_limit", 20)
+    reply_limit = getattr(args, "reply_limit", 10)
+    scroll_speed = getattr(args, "scroll_speed", "normal")
+    if comment_limit < 1 or comment_limit > 100:
+        raise SourceError("评论数量必须在 1 到 100 之间")
+    if reply_limit < 1 or reply_limit > 50:
+        raise SourceError("回复阈值必须在 1 到 50 之间")
+    arguments = {
+        "feed_id": args.note_id,
+        "xsec_token": cached["xsec_token"],
+        "load_all_comments": all_comments,
+    }
+    if all_comments:
+        arguments.update(
+            {
+                "limit": comment_limit,
+                "click_more_replies": include_replies,
+                "reply_limit": reply_limit,
+                "scroll_speed": scroll_speed,
+            }
+        )
     data = xhs_mcp_call(
         "get_feed_detail",
-        {
-            "feed_id": args.note_id,
-            "xsec_token": cached["xsec_token"],
-            "load_all_comments": False,
-        },
+        arguments,
     )
     if not isinstance(data, dict):
         raise SourceError("xiaohongshu-mcp 详情返回格式无效")
@@ -583,6 +1307,10 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
     note = detail.get("note") or {}
     user = note.get("user") or {}
     interactions = note.get("interactInfo") or {}
+    comments = normalize_xhs_comments(detail, include_replies=include_replies)
+    comment_insights = build_xhs_comment_insights(comments)
+    note_id = str(note.get("noteId") or args.note_id)
+    image_count = cache_images(xhs_mcp_token_cache_path().parent, note_id, note.get("imageList") or [])
     return {
         "status": "community_reported",
         "provider": "xpzouying/xiaohongshu-mcp（非官方）",
@@ -602,9 +1330,30 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
             },
             "source_url": cached.get("source_url"),
         },
+        "comments": comments,
+        "comment_insights": comment_insights["comment_insights"],
+        "needs_recheck": comment_insights["needs_recheck"],
+        "comment_analysis": comment_insights["comment_analysis"],
+        "image_reading": {"image_count": image_count, "status": "not_read" if image_count else "no_images",
+                          "body_missing": not bool(str(note.get("desc") or note.get("body") or "").strip()),
+                          "image_indices": list(range(1, image_count + 1))},
+        "comment_collection": {
+            "mode": "expanded" if all_comments else "sampled",
+            "top_level_limit": comment_limit if all_comments else 10,
+            "include_replies": include_replies,
+            "reply_limit": reply_limit if all_comments and include_replies else None,
+            "scroll_speed": scroll_speed if all_comments else None,
+        },
         "checked_at": checked_at(),
-        "disclaimer": "未归档评论、图片或临时令牌；关键事实需与官方来源交叉核验。",
+        "disclaimer": "评论洞察仅作为近期社区体验信号；默认只读取前10条一级评论，完整评论区和临时令牌不归档，开放、价格、预约、交通和安全等关键事实需与官方来源交叉核验。",
     }
+
+
+def xhs_images(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        return prepare_images(xhs_mcp_token_cache_path().parent, args.note_id, args.indices)
+    except ValueError as error:
+        raise SourceError(str(error)) from None
 
 
 def get_amap_key() -> str | None:
@@ -689,6 +1438,11 @@ def capabilities(_: argparse.Namespace) -> dict[str, Any]:
             "start": "python3 skills/xiaohongshu/scripts/setup.py start",
             "endpoint": xhs_mcp_url(),
             "travel_default": "read_only",
+        },
+        "food_discovery": {
+            "enabled": False,
+            "status": "paused",
+            "reason": "餐饮研究仅使用小红书和高德；抖音、点评实验代码保留，不注册 MCP",
         },
         "checked_at": checked_at(),
     }
@@ -902,49 +1656,53 @@ def _xiaohongshu_preflight(args: argparse.Namespace, required: bool) -> dict[str
 
 
 def preflight(args: argparse.Namespace) -> dict[str, Any]:
+    if not getattr(args, "phase", None):
+        args.phase = "preflight"
     required = set(args.require or [])
-    checks = [
-        _amap_preflight(args, "amap-maps" in required),
-        _variflight_preflight(
-            args,
-            "variflight_aviation",
-            "variflight-aviation",
-            {"getFutureWeatherByAirport", "searchFlightsByDepArr"},
-            "getFutureWeatherByAirport",
-            {"airport": args.airport},
-            "variflight-aviation" in required,
-        ),
-        _variflight_preflight(
-            args,
-            "variflight_tripmatch",
-            "variflight-tripmatch",
-            {"searchTrainStations", "searchTrainTicketsByCity"},
-            "searchTrainStations",
-            {"query": args.city},
-            "variflight-tripmatch" in required,
-        ),
-        _flyai_preflight(args, "flyai" in required),
-        _weather_preflight(args, "open-meteo" in required),
-        _xiaohongshu_preflight(args, "xiaohongshu" in required),
-    ]
-    required_failures = [
-        check["source_id"]
-        for check in checks
-        if check["required"] and check["status"] != "ready"
-    ]
-    if required_failures:
-        status = "unavailable"
-    elif any(check["status"] != "ready" for check in checks):
-        status = "degraded"
-    else:
-        status = "ready"
+    selected = set(PREFLIGHT_SOURCES) if getattr(args, "all_sources", False) else set(getattr(args, "source", None) or []) | required
+    probes = {
+        "amap-maps": lambda: _amap_preflight(args, "amap-maps" in required),
+        "variflight-aviation": lambda: _variflight_preflight(args, "variflight_aviation", "variflight-aviation",
+            {"getFutureWeatherByAirport", "searchFlightsByDepArr"}, "getFutureWeatherByAirport",
+            {"airport": args.airport}, "variflight-aviation" in required),
+        "variflight-tripmatch": lambda: _variflight_preflight(args, "variflight_tripmatch", "variflight-tripmatch",
+            {"searchTrainStations", "searchTrainTicketsByCity"}, "searchTrainStations",
+            {"query": args.city}, "variflight-tripmatch" in required),
+        "flyai": lambda: _flyai_preflight(args, "flyai" in required),
+        "open-meteo": lambda: _weather_preflight(args, "open-meteo" in required),
+        "xiaohongshu": lambda: _xiaohongshu_preflight(args, "xiaohongshu" in required),
+    }
+    checks = []
+    for source_id in PREFLIGHT_SOURCES:
+        if source_id not in selected:
+            continue
+        def probe(source_id=source_id):
+            result = probes[source_id]()
+            result["checked_at"] = checked_at()
+            return result
+        if args.skip_upstream:
+            # An offline handshake must not consume or create a live health proof.
+            result = probe()
+            result["execution"] = {"mode": "fresh", "offline": True}
+        else:
+            result = dict(run_query(args, "preflight-" + source_id, {}, probe, source_id,
+                                    reuse_key=health_key(source_id)))
+            result["execution"] = getattr(args, "_execution", {"mode": "fresh"})
+        result["required"] = source_id in required
+        if source_id == "xiaohongshu" and result.get("status") == "authenticated":
+            result.update(status="ready", scope="observed_operation", operation="check-login-status")
+        if "latency_ms" in result:
+            result["probe_latency_ms"] = result["latency_ms"]
+        result["latency_ms"] = result["execution"].get("elapsed_ms", result.get("latency_ms", 0))
+        checks.append(result)
+    required_failures = [check["source_id"] for check in checks if check["required"] and check["status"] != "ready"]
+    status = ("not_requested" if not checks else "unavailable" if required_failures else
+              "degraded" if any(check["status"] != "ready" for check in checks) else "ready")
     return {
-        "schema_version": "travel-source-preflight/v1",
-        "status": status,
-        "required_sources": sorted(required),
-        "required_failures": required_failures,
-        "checks": checks,
-        "checked_at": checked_at(),
+        "schema_version": "travel-source-preflight/v1", "status": status,
+        "selected_sources": sorted(selected), "skipped_sources": sorted(set(PREFLIGHT_SOURCES) - selected),
+        "required_sources": sorted(required), "required_failures": required_failures,
+        "checks": checks, "checked_at": checked_at(),
     }
 
 
@@ -956,18 +1714,24 @@ def provider_query(
     arguments: dict[str, Any],
     query: dict[str, Any],
 ) -> dict[str, Any]:
-    snapshot = adapter(provider_id).query(
-        product_type=product_type,
-        tool=tool,
-        arguments=arguments,
-        query=query,
-        timeout=args.timeout,
-        limit=getattr(args, "limit", None),
-    )
     workspace = getattr(args, "workspace", None)
     task_id = getattr(args, "task_id", None)
     if bool(workspace) != bool(task_id):
         raise AdapterError("invalid_response", "--workspace 和 --task-id 必须同时提供")
+    if workspace:
+        root = execution_log.workspace_root(workspace)
+        assignment_path = root / "assignments" / f"{execution_log.identifier(task_id)}.json"
+        if not assignment_path.is_file():
+            raise AdapterError("workspace_error", "报价查询的任务尚未分配，未请求供应商")
+        assignment = read_workspace_json(assignment_path)
+        if product_type not in INVENTORY_PRODUCTS_BY_DOMAIN.get(assignment.get("domain"), set()):
+            raise AdapterError("workspace_error", "此任务领域不接收该产品快照，未请求供应商")
+    source_id = {"fliggy_flyai": "flyai", "variflight_aviation": "variflight-aviation",
+                 "variflight_tripmatch": "variflight-tripmatch"}[provider_id]
+    snapshot = run_query(args, tool, {"provider": provider_id, "product_type": product_type,
+        "arguments": arguments, "query": query, "limit": getattr(args, "limit", None)},
+        lambda: adapter(provider_id).query(product_type=product_type, tool=tool, arguments=arguments,
+            query=query, timeout=args.timeout, limit=getattr(args, "limit", None)), source_id, prove_health=True)
     if workspace and task_id:
         try:
             store_source_snapshot(Path(workspace), task_id, snapshot)
@@ -997,20 +1761,28 @@ def provider_coverage_query(
 ) -> dict[str, Any]:
     """Run the standard feasibility-first sort coverage and persist every snapshot."""
     snapshots = []
-    for sort_type in TRANSPORT_COVERAGE_SORTS:
+    executions = []
+    dimensions = getattr(args, "dimension", None)
+    selected_sorts = set(TRANSPORT_COVERAGE_SORTS) if not dimensions else set().union(*(
+        {"time": {6, 7, 4}, "price": {3}, "recommendation": {2}}[dimension] for dimension in dimensions))
+    sorts = [value for value in TRANSPORT_COVERAGE_SORTS if value in selected_sorts]
+    for sort_type in sorts:
         query_args = argparse.Namespace(**vars(args))
         query_args.sort_type = sort_type
         snapshots.append(handler(query_args))
+        if getattr(query_args, "_execution", None):
+            executions.append({"sort_type": sort_type, **query_args._execution})
     return {
         "schema_version": "travel-source-snapshot-batch/v1",
         "status": "platform_reported",
         "product_type": product_type,
         "coverage": [
             {"sort_type": value, "purpose": TRANSPORT_SORT_LABELS[value]}
-            for value in TRANSPORT_COVERAGE_SORTS
+            for value in sorts
         ],
         "snapshot_ids": [snapshot["snapshot_id"] for snapshot in snapshots],
         "snapshots": snapshots,
+        **({"execution": {"mode": "batch", "queries": executions}} if executions else {}),
         "checked_at": checked_at(),
         "disclaimer": "多排序查询用于覆盖时间与价格边界；结果不代表库存持续有效或已经预订。",
     }
@@ -1538,8 +2310,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser(
         "preflight",
-        help="真实探测 MCP、供应商 API、天气与小红书运行态",
+        help="仅探测本次选定来源；全部探测仅用于显式诊断",
     )
+    command.add_argument("--source", action="append", choices=PREFLIGHT_SOURCES,
+                         help="本次需要检查的可选来源；可重复传入，不探测未选择来源")
+    command.add_argument("--all-sources", action="store_true", help="显式诊断全部来源，不用于默认规划")
     command.add_argument(
         "--require",
         action="append",
@@ -1572,9 +2347,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("xhs-search", help="搜索小红书公开笔记并脱敏输出")
     command.add_argument("--keyword", required=True)
-    command.add_argument("--sort-by", choices=["relevance", "latest", "most_liked", "most_commented", "most_collected"], default="latest")
+    command.add_argument("--sort-by", choices=["relevance", "latest", "most_liked", "most_commented", "most_collected"], default="relevance")
     command.add_argument("--note-type", choices=["all", "video", "image"], default="all")
-    command.add_argument("--publish-time", choices=["all", "day", "week", "half_year"], default="half_year")
+    command.add_argument("--publish-time", choices=["all", "day", "week", "half_year"], default="all")
     command.add_argument("--search-scope", choices=["all", "viewed", "unviewed", "following"], default="all")
     command.add_argument("--location", choices=["all", "same_city", "nearby"], default="all")
     command.add_argument("--limit", type=int, default=10, choices=range(1, 21), metavar="1-20")
@@ -1582,7 +2357,44 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("xhs-detail", help="读取已搜索到的小红书笔记详情")
     command.add_argument("--note-id", required=True)
+    command.add_argument(
+        "--all-comments",
+        action="store_true",
+        help="滚动加载更多一级评论；默认只返回上游默认的前10条一级评论",
+    )
+    command.add_argument(
+        "--comment-limit",
+        type=int,
+        default=20,
+        choices=range(1, 101),
+        metavar="1-100",
+        help="扩展评论模式下的一级评论上限",
+    )
+    command.add_argument(
+        "--include-replies",
+        action="store_true",
+        help="扩展评论模式下展开二级回复",
+    )
+    command.add_argument(
+        "--reply-limit",
+        type=int,
+        default=10,
+        choices=range(1, 51),
+        metavar="1-50",
+        help="扩展评论模式下跳过回复数超过该阈值的评论",
+    )
+    command.add_argument(
+        "--scroll-speed",
+        choices=["slow", "normal", "fast"],
+        default="normal",
+        help="扩展评论模式下的滚动速度",
+    )
     command.set_defaults(handler=xhs_detail)
+
+    command = subparsers.add_parser("xhs-images", help="临时准备已读笔记的1至3张图片，供看图提取信息")
+    command.add_argument("--note-id", required=True)
+    command.add_argument("--indices", type=int, nargs="+", required=True, help="图片序号，从1开始；最多3张")
+    command.set_defaults(handler=xhs_images)
 
     command = subparsers.add_parser("amap-place", help="查询高德 POI 或景区入口")
     command.add_argument("--keywords", required=True)
@@ -1614,6 +2426,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="按最早、最晚、时长、价格和推荐排序查询航班可行性边界",
     )
     add_flyai_flight_options(command)
+    command.add_argument("--dimension", action="append", choices=["time", "price", "recommendation"],
+                         help="只查询需要比较的维度；可重复指定，省略时兼容旧全排序")
     command.set_defaults(handler=flyai_flight_coverage)
 
     command = subparsers.add_parser("flyai-train", help="通过飞猪 FlyAI 查询火车候选")
@@ -1625,6 +2439,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="按最早、最晚、时长、价格和推荐排序查询火车可行性边界",
     )
     add_flyai_train_options(command)
+    command.add_argument("--dimension", action="append", choices=["time", "price", "recommendation"],
+                         help="只查询需要比较的维度；可重复指定，省略时兼容旧全排序")
     command.set_defaults(handler=flyai_train_coverage)
 
     command = subparsers.add_parser("flyai-hotel", help="通过飞猪 FlyAI 查询酒店候选")
@@ -1708,13 +2524,43 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--url", help="已核验的景区官方 HTTPS 地址")
     command.add_argument("--recheck", default="建议出发前再次复核")
     command.set_defaults(handler=fallback)
+    for name, query_parser in subparsers.choices.items():
+        if name in {"capabilities", "fallback"}:
+            continue
+        existing = {action.dest for action in query_parser._actions}
+        if "workspace" not in existing:
+            query_parser.add_argument("--workspace", help="本次研究工作区；用于短时复用和执行计时")
+        if "task_id" not in existing:
+            query_parser.add_argument("--task-id", help="记录调用所属任务；非报价查询可省略")
+        query_parser.add_argument("--phase", type=execution_log.identifier,
+                                  help="调用所属研究阶段；省略时按命令类型分类")
+        if name not in {"xhs-health", "xhs-images", "xhs-login-status"}:
+            query_parser.add_argument("--refresh", action="store_true", help="忽略本次工作区的有效复用记录，重新请求")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        payload = args.handler(args)
+        with execution_log.measured(getattr(args, "workspace", None), query_phase(args), args.command,
+                                    task_id=getattr(args, "task_id", None)) as command_span:
+            source_ids = {"weather": "open-meteo", "amap-place": "amap-api", "amap-route": "amap-api",
+                          "xhs-search": "xiaohongshu", "xhs-detail": "xiaohongshu", "osm-place": "osm"}
+            if args.command in source_ids:
+                source_id = source_ids[args.command]
+                payload = run_query(args, args.command, command_parameters(args), lambda: args.handler(args),
+                                    source_id, prove_health=source_id in {"open-meteo", "xiaohongshu"})
+            elif args.command == "xhs-login-status":
+                # Explicit login diagnostics always check the live session.
+                args.refresh = True
+                payload = run_query(args, "check-login-status", {}, lambda: args.handler(args),
+                                    "xiaohongshu", reuse_key=health_key("xiaohongshu"))
+            else:
+                payload = args.handler(args)
+            if args.command == "preflight" and payload.get("status") == "unavailable":
+                command_span["status"] = "failed"
+        if args.command != "preflight" and getattr(args, "_execution", None):
+            payload = {**payload, "execution": args._execution}
         output(payload)
         if args.command == "preflight" and payload.get("status") == "unavailable":
             return 2
@@ -1730,7 +2576,7 @@ def main() -> int:
             }
         )
         return 2
-    except SourceError as error:
+    except (SourceError, WorkspaceError, execution_log.ExecutionError) as error:
         output({"status": "error", "message": str(error), "checked_at": checked_at()})
         return 2
 

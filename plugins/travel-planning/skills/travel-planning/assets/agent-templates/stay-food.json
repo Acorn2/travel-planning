@@ -1,6 +1,6 @@
 {
   "schema_version": "travel-research-result/v2",
-  "template_version": 4,
+  "template_version": 6,
   "template_digest": "COPY_FROM_ASSIGNMENT",
   "task_id": "COPY_FROM_ASSIGNMENT",
   "status": "complete",
@@ -13,18 +13,25 @@
   },
   "shared_entities": [
     {
-      "entity_id": "lodging-stable-id",
-      "entity_type": "lodging",
+      "entity_id": "stay-area-stable-id",
+      "entity_type": "place",
       "canonical_name": "",
       "aliases": [],
-      "tags": [],
-      "location": {},
+      "tags": [
+        "住宿区域"
+      ],
+      "location": {
+        "address": "",
+        "precision": "area"
+      },
       "facts": {
-        "physical_address": "",
-        "coordinates": "",
-        "official_endpoints": {},
-        "facilities": [],
-        "luggage_storage_policy": ""
+        "area": "",
+        "why_here": "",
+        "check_in": "",
+        "check_out": "",
+        "nights": null,
+        "route_note": "",
+        "selection_notes": []
       },
       "source_ids": []
     }
@@ -32,5 +39,6 @@
   "event_bindings": [],
   "constraints": [],
   "unresolved": [],
-  "source_ids": []
+  "source_ids": [],
+  "community_evidence": []
 }

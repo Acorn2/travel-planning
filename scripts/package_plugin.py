@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import stat
 import subprocess
 import tempfile
 import zipfile
@@ -17,6 +16,19 @@ DEFAULT_PLUGIN_DIR = Path("plugins/travel-planning")
 DEFAULT_MARKETPLACE_FILE = Path(".agents/plugins/marketplace.json")
 DEFAULT_OUTPUT = Path("output/travel-planning-marketplace.zip")
 DEFAULT_BUNDLE_NAME = "travel-planning-marketplace"
+PRIVATE_DIRECTORIES = {".git", ".idea", ".tmp", ".travel-research", ".travel-tools", "travel-plans", "node_modules", "__pycache__"}
+PRIVATE_FILENAMES = {".DS_Store", "cookies.json", "credentials.json", "service.pid", "service.json", "service.log", "id_rsa", "id_ed25519"}
+
+
+def distributable_path(path: Path) -> bool:
+    if path.is_absolute() or ".." in path.parts or any(part in PRIVATE_DIRECTORIES for part in path.parts):
+        return False
+    name = path.name.casefold()
+    if path.name in PRIVATE_FILENAMES or name.endswith((".key", ".pem", ".pyc")):
+        return False
+    if name == ".env.example" or name.endswith(".example.env"):
+        return True
+    return not (name == ".env" or name.startswith(".env.") or name.endswith(".env"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,7 +62,7 @@ def repository_relative(path: Path, argument_name: str) -> Path:
 
 
 def package_files(plugin_dir: Path) -> list[Path]:
-    included_paths = [Path("README.md"), Path("LICENSE"), DEFAULT_MARKETPLACE_FILE, plugin_dir]
+    included_paths = [Path("README.md"), Path("LICENSE"), Path(".env.example"), DEFAULT_MARKETPLACE_FILE, plugin_dir]
     result = subprocess.run(
         [
             "git",
@@ -68,19 +80,27 @@ def package_files(plugin_dir: Path) -> list[Path]:
         stdout=subprocess.PIPE,
     )
     candidates = [Path(os.fsdecode(item)) for item in result.stdout.split(b"\0") if item]
-    return sorted(
-        path
-        for path in candidates
-        if (REPOSITORY_ROOT / path).is_file() or (REPOSITORY_ROOT / path).is_symlink()
+    if not candidates:
+        return []
+    # --cached can include ignored files; apply ignore rules independently of tracking.
+    ignored_result = subprocess.run(
+        ["git", "-C", os.fspath(REPOSITORY_ROOT), "check-ignore", "--no-index", "-z", "--stdin"],
+        input=b"\0".join(os.fsencode(path) for path in candidates) + b"\0",
+        stdout=subprocess.PIPE, check=False,
     )
-
-
-def add_symlink(archive: zipfile.ZipFile, source: Path, archive_name: Path) -> None:
-    mode = source.lstat().st_mode
-    info = zipfile.ZipInfo(archive_name.as_posix())
-    info.create_system = 3
-    info.external_attr = (stat.S_IFLNK | stat.S_IMODE(mode)) << 16
-    archive.writestr(info, os.readlink(source).encode())
+    if ignored_result.returncode not in (0, 1):
+        raise SystemExit("无法检查 Git 忽略规则，不会生成分发包")
+    ignored = {Path(os.fsdecode(item)) for item in ignored_result.stdout.split(b"\0") if item}
+    included = []
+    for path in candidates:
+        if path in ignored or not distributable_path(path):
+            continue
+        source = REPOSITORY_ROOT / path
+        if any((REPOSITORY_ROOT / parent).is_symlink() for parent in (path, *path.parents)):
+            raise SystemExit(f"分发包不接受符号链接：{path}；请使用实际资源文件")
+        if source.is_file():
+            included.append(path)
+    return sorted(included)
 
 
 def build_archive(plugin_dir: Path, output: Path, bundle_name: str) -> int:
@@ -112,10 +132,9 @@ def build_archive(plugin_dir: Path, output: Path, bundle_name: str) -> int:
             for relative_path in files:
                 source = REPOSITORY_ROOT / relative_path
                 archive_name = Path(bundle_name) / relative_path
-                if source.is_symlink():
-                    add_symlink(archive, source, archive_name)
-                else:
-                    archive.write(source, archive_name.as_posix())
+                if any((REPOSITORY_ROOT / parent).is_symlink() for parent in (relative_path, *relative_path.parents)) or not distributable_path(relative_path):
+                    raise SystemExit(f"分发文件在打包前发生变化：{relative_path}")
+                archive.write(source, archive_name.as_posix())
         temporary_path.replace(output_path)
     finally:
         temporary_path.unlink(missing_ok=True)

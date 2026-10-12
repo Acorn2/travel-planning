@@ -3,28 +3,129 @@
   "$id": "https://example.invalid/schemas/restaurant.schema.json",
   "title": "Trip restaurant entity",
   "type": "object",
-  "required": ["id", "name", "location", "signature_dishes", "media", "action_links", "source_ids"],
+  "required": [
+    "id",
+    "name",
+    "location",
+    "signature_dishes",
+    "media",
+    "action_links",
+    "source_ids"
+  ],
   "properties": {
-    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"},
-    "name": {"type": "string", "minLength": 1},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
     "location": {
       "type": "object",
-      "required": ["physical_address", "coordinates", "coordinate_system", "poi_id", "poi_provider", "poi_source_id", "poi_verified_at"],
+      "required": [
+        "physical_address"
+      ],
       "properties": {
-        "physical_address": {"type": "string", "minLength": 6},
-        "coordinates": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?\\s*,\\s*-?[0-9]+(?:\\.[0-9]+)?$"},
-        "coordinate_system": {"enum": ["GCJ-02", "WGS84"]},
-        "poi_id": {"type": "string", "minLength": 1},
-        "poi_provider": {"type": "string", "minLength": 1},
-        "poi_source_id": {"type": "string", "minLength": 1},
-        "poi_verified_at": {"type": "string", "minLength": 1}
+        "physical_address": {
+          "type": "string",
+          "minLength": 6
+        },
+        "coordinates": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(?:\\.[0-9]+)?\\s*,\\s*-?[0-9]+(?:\\.[0-9]+)?$"
+        },
+        "coordinate_system": {
+          "enum": [
+            "GCJ-02",
+            "WGS84"
+          ]
+        },
+        "poi_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "poi_provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "poi_source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "poi_verified_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verification": {
+          "type": "object",
+          "required": [
+            "checked_at",
+            "source_ids"
+          ],
+          "properties": {
+            "checked_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_ids": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "anyOf": [
+        {
+          "required": [
+            "physical_address",
+            "coordinates",
+            "coordinate_system",
+            "poi_id",
+            "poi_provider",
+            "poi_source_id",
+            "poi_verified_at"
+          ]
+        },
+        {
+          "required": [
+            "verification"
+          ]
+        }
+      ]
     },
-    "signature_dishes": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-    "media": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "action_links": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+    "signature_dishes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "media": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object"
+      }
+    },
+    "action_links": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object"
+      }
+    },
+    "source_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
   },
   "additionalProperties": true
 }

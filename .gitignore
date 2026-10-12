@@ -1,4 +1,8 @@
 .travel-research/
+/.env
+/.env.local
+.tmp/
+travel-plans/
 .travel-tools/
 .playwright-cli/
 output/
@@ -6,3 +10,13 @@ output/
 __pycache__/
 *.pyc
 **/node_modules/
+docs/
+.DS_Store
+.idea/
+.env
+.env.*
+*.env
+!.env.example
+!*.example.env
+# Local itinerary design prototypes and screenshots; reusable UI lives in web/src/.
+/designs/

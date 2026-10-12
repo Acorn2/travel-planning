@@ -108,7 +108,20 @@
       },
       "additionalProperties": false
     },
-    "disclaimer": {"type": "string", "minLength": 1}
+    "disclaimer": {"type": "string", "minLength": 1},
+    "execution": {
+      "type": "object",
+      "description": "Optional wrapper metadata; original snapshot identity and capture time stay unchanged.",
+      "required": ["mode", "query_key", "original_checked_at", "elapsed_ms"],
+      "properties": {
+        "mode": {"enum": ["fresh", "reused"]},
+        "query_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "original_checked_at": {"type": "string", "format": "date-time"},
+        "elapsed_ms": {"type": "integer", "minimum": 0},
+        "expires_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

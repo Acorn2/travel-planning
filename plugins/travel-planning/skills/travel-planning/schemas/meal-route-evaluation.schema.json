@@ -18,51 +18,193 @@
     "source_ids"
   ],
   "properties": {
-    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"},
-    "meal_id": {"type": "string", "minLength": 1},
-    "restaurant_id": {"type": "string", "minLength": 1},
-    "baseline_route_id": {"type": "string", "minLength": 1},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+    },
+    "meal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "restaurant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_route_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "comparison_basis": {
       "type": "object",
-      "required": ["mode", "routing_policy", "departure_at"],
+      "required": [
+        "mode",
+        "routing_policy",
+        "departure_at"
+      ],
       "properties": {
-        "mode": {"type": "string", "minLength": 1},
-        "routing_policy": {"type": "string", "minLength": 1},
-        "departure_at": {"type": "string", "minLength": 1}
+        "mode": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routing_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "departure_at": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
-    "from_previous": {"$ref": "#/$defs/leg"},
-    "to_next": {"$ref": "#/$defs/leg"},
-    "total_door_to_door_minutes": {"type": "number", "minimum": 0},
-    "baseline_door_to_door_minutes": {"type": "number", "minimum": 0},
-    "detour_minutes": {"type": "number", "minimum": 0},
-    "access": {"type": "object"},
-    "checked_at": {"type": "string", "minLength": 1},
-    "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+    "from_previous": {
+      "$ref": "#/$defs/leg"
+    },
+    "to_next": {
+      "$ref": "#/$defs/leg"
+    },
+    "total_door_to_door_minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "baseline_door_to_door_minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "detour_minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "access": {
+      "type": "object"
+    },
+    "checked_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
   },
   "$defs": {
     "leg": {
       "type": "object",
-      "required": ["route_id", "origin", "destination", "distance_meters", "duration_minutes", "door_to_door_minutes", "map_url"],
+      "required": [
+        "route_id",
+        "origin",
+        "destination",
+        "door_to_door_minutes"
+      ],
       "properties": {
-        "route_id": {"type": "string", "minLength": 1},
-        "origin": {"$ref": "#/$defs/endpoint"},
-        "destination": {"$ref": "#/$defs/endpoint"},
-        "distance_meters": {"type": "number", "minimum": 0},
-        "duration_minutes": {"type": "number", "minimum": 0},
-        "door_to_door_minutes": {"type": "number", "minimum": 0},
-        "map_url": {"type": "string", "pattern": "^https://"}
+        "route_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin": {
+          "$ref": "#/$defs/endpoint"
+        },
+        "destination": {
+          "$ref": "#/$defs/endpoint"
+        },
+        "distance_meters": {
+          "type": "number",
+          "minimum": 0
+        },
+        "duration_minutes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "door_to_door_minutes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "map_url": {
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "status": {
+          "enum": [
+            "verified",
+            "platform_reported",
+            "estimated"
+          ]
+        },
+        "basis": {
+          "type": "string"
+        },
+        "duration_range_minutes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "buffer_minutes": {
+          "type": "number",
+          "minimum": 0
+        }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "source_ids",
+              "checked_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "estimated"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "basis",
+              "duration_range_minutes",
+              "buffer_minutes"
+            ]
+          }
+        }
+      ]
     },
     "endpoint": {
       "type": "object",
-      "required": ["name", "physical_address", "coordinates"],
+      "required": [
+        "name",
+        "physical_address"
+      ],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "physical_address": {"type": "string", "minLength": 1},
-        "coordinates": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?\\s*,\\s*-?[0-9]+(?:\\.[0-9]+)?$"}
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_address": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coordinates": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(?:\\.[0-9]+)?\\s*,\\s*-?[0-9]+(?:\\.[0-9]+)?$"
+        }
       },
       "additionalProperties": true
     }

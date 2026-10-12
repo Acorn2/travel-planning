@@ -9,6 +9,8 @@ description: 使用插件已配置的高德地图 MCP 查询中国境内地址�
 
 ## 工具路由
 
+一次关键词搜索对应一个地点或一种需求；不同门店分别查询，城市、半径等条件使用对应参数。旅行中的发现、补查与逐次记录遵循 [跨渠道搜索设计](../travel-planning/references/search-design.md)。
+
 - 地址转坐标使用 `maps_geo`；坐标转地址使用 `maps_regeocode`。
 - 关键词找地点使用 `maps_text_search`；以坐标为中心找附近地点使用 `maps_around_search`；需要核准某个候选的身份和详情时再用 `maps_search_detail`。
 - 查附近餐厅时，先用餐饮锚点坐标调用 `maps_around_search`，再对保留候选逐个调用 `maps_search_detail`。周边返回顺序只是平台搜索结果，不等于高德官方推荐或本行程最终推荐。

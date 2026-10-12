@@ -11,40 +11,151 @@
     "mode",
     "routing_policy",
     "departure_at",
-    "distance_meters",
-    "duration_minutes",
     "door_to_door_minutes",
-    "map_url",
     "checked_at",
     "source_ids"
   ],
   "properties": {
-    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"},
-    "meal_id": {"type": "string", "minLength": 1},
-    "from_anchor": {"$ref": "#/$defs/anchor"},
-    "to_anchor": {"$ref": "#/$defs/anchor"},
-    "mode": {"type": "string", "minLength": 1},
-    "routing_policy": {"type": "string", "minLength": 1},
-    "departure_at": {"type": "string", "minLength": 1},
-    "distance_meters": {"type": "number", "minimum": 0},
-    "duration_minutes": {"type": "number", "minimum": 0},
-    "door_to_door_minutes": {"type": "number", "minimum": 0},
-    "map_url": {"type": "string", "pattern": "^https://"},
-    "checked_at": {"type": "string", "minLength": 1},
-    "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+    },
+    "meal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "from_anchor": {
+      "$ref": "#/$defs/anchor"
+    },
+    "to_anchor": {
+      "$ref": "#/$defs/anchor"
+    },
+    "mode": {
+      "type": "string",
+      "minLength": 1
+    },
+    "routing_policy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "departure_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "distance_meters": {
+      "type": "number",
+      "minimum": 0
+    },
+    "duration_minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "door_to_door_minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "map_url": {
+      "type": "string",
+      "pattern": "^https://"
+    },
+    "checked_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "enum": [
+        "verified",
+        "platform_reported",
+        "estimated"
+      ]
+    },
+    "basis": {
+      "type": "string"
+    },
+    "duration_range_minutes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number",
+        "minimum": 0
+      }
+    },
+    "buffer_minutes": {
+      "type": "number",
+      "minimum": 0
+    }
   },
   "$defs": {
     "anchor": {
       "type": "object",
-      "required": ["name", "physical_address", "coordinates", "coordinate_system"],
+      "required": [
+        "name",
+        "physical_address"
+      ],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "physical_address": {"type": "string", "minLength": 1},
-        "coordinates": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?\\s*,\\s*-?[0-9]+(?:\\.[0-9]+)?$"},
-        "coordinate_system": {"enum": ["GCJ-02", "WGS84"]}
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_address": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coordinates": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(?:\\.[0-9]+)?\\s*,\\s*-?[0-9]+(?:\\.[0-9]+)?$"
+        },
+        "coordinate_system": {
+          "enum": [
+            "GCJ-02",
+            "WGS84"
+          ]
+        }
       },
       "additionalProperties": true
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "source_ids",
+          "checked_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "estimated"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "basis",
+          "duration_range_minutes",
+          "buffer_minutes"
+        ]
+      }
+    }
+  ]
 }

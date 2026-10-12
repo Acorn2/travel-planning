@@ -6,12 +6,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
-import selectors
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
@@ -221,29 +222,51 @@ def _send_message(process: subprocess.Popen[str], message: dict[str, Any]) -> No
     process.stdin.flush()
 
 
+class _McpResponseReader:
+    """One reader per process keeps buffered lines across sequential requests."""
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        assert process.stdout is not None
+        self.stdout = process.stdout
+        self.lines: queue.Queue[str | Exception | None] = queue.Queue()
+        self.thread = threading.Thread(target=self._read_lines, daemon=True)
+        self.thread.start()
+
+    def _read_lines(self) -> None:
+        try:
+            while line := self.stdout.readline():
+                self.lines.put(line)
+        except (OSError, UnicodeError, ValueError) as error:
+            self.lines.put(error)
+        finally:
+            self.lines.put(None)
+            self.stdout.close()
+
+
 def _read_response(
-    process: subprocess.Popen[str], request_id: int, timeout: int
+    process: subprocess.Popen[str], request_id: int, timeout: int | float
 ) -> dict[str, Any]:
-    assert process.stdout is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
+    reader = getattr(process, "_travel_mcp_reader", None)
+    if reader is None:
+        reader = _McpResponseReader(process)
+        process._travel_mcp_reader = reader
     deadline = time.monotonic() + timeout
-    try:
-        while time.monotonic() < deadline:
-            remaining = max(0.0, deadline - time.monotonic())
-            if not selector.select(remaining):
-                break
-            line = process.stdout.readline()
-            if not line:
-                break
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if message.get("id") == request_id:
-                return message
-    finally:
-        selector.close()
+    while time.monotonic() < deadline:
+        try:
+            # readline may await a newline; only the worker blocks on the pipe.
+            line = reader.lines.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty:
+            break
+        if line is None:
+            break
+        if isinstance(line, Exception):
+            raise AdapterError("invalid_response", "MCP 输出无法读取为 UTF-8 文本") from line
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict) and message.get("id") == request_id:
+            return message
     raise AdapterError("timeout", f"MCP 请求 {request_id} 在 {timeout} 秒内未返回")
 
 
@@ -274,7 +297,10 @@ def _mcp_result_payload(result: dict[str, Any]) -> Any:
 
 def _stop_mcp_process(process: subprocess.Popen[str]) -> None:
     if process.stdin:
-        process.stdin.close()
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
     if process.poll() is None:
         process.terminate()
         try:
@@ -282,6 +308,11 @@ def _stop_mcp_process(process: subprocess.Popen[str]) -> None:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=2)
+    reader = getattr(process, "_travel_mcp_reader", None)
+    if isinstance(reader, _McpResponseReader):
+        reader.thread.join(timeout=2)
+    elif process.stdout:
+        process.stdout.close()
 
 
 def probe_mcp_stdio(
@@ -301,6 +332,7 @@ def probe_mcp_stdio(
             stderr=stderr_file,
             env=env,
             text=True,
+            encoding="utf-8",
             bufsize=1,
         )
     except OSError as error:
@@ -379,6 +411,7 @@ def call_mcp_stdio(
             stderr=stderr_file,
             env=env,
             text=True,
+            encoding="utf-8",
             bufsize=1,
         )
     except OSError as error:

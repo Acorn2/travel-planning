@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/community-evidence.schema.json",
+  "title": "Community evidence",
+  "type": "object",
+  "required": [
+    "target_entity_id",
+    "target_entity_type",
+    "provider",
+    "checked_at",
+    "topic",
+    "insight",
+    "support_count",
+    "contradiction_count",
+    "community_confidence",
+    "needs_official_recheck",
+    "source_ids"
+  ],
+  "properties": {
+    "target_entity_id": {"type": "string", "minLength": 1},
+    "target_entity_type": {
+      "enum": [
+        "attraction",
+        "restaurant",
+        "lodging",
+        "place",
+        "transport_hub",
+        "route_anchor",
+        "transport_edge",
+        "meal",
+        "route",
+        "weather",
+        "trip"
+      ]
+    },
+    "provider": {"type": "string", "minLength": 1},
+    "checked_at": {"type": "string", "minLength": 1},
+    "topic": {"type": "string", "minLength": 1},
+    "insight": {"type": "string", "minLength": 1},
+    "latest_evidence_at": {"type": ["string", "null"]},
+    "support_count": {"type": "integer", "minimum": 0},
+    "contradiction_count": {"type": "integer", "minimum": 0},
+    "community_confidence": {"enum": ["low", "medium"]},
+    "needs_official_recheck": {"type": "boolean"},
+    "status": {"enum": ["available", "partial", "unavailable", "to_recheck"]},
+    "recheck_reason": {"type": ["string", "null"]},
+    "source_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "evidence": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

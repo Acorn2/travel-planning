@@ -21,14 +21,25 @@
     },
     "trip": {
       "type": "object",
-      "required": ["title", "date_range", "travelers", "updated_at"]
+      "required": [
+        "title",
+        "date_range",
+        "travelers",
+        "updated_at"
+      ]
     },
     "workflow": {
       "type": "object",
-      "required": ["phase", "selected_route_id"],
+      "required": [
+        "phase",
+        "selected_route_id"
+      ],
       "properties": {
         "phase": {
-          "enum": ["confirmed_planning", "final"]
+          "enum": [
+            "confirmed_planning",
+            "final"
+          ]
         },
         "selected_route_id": {
           "type": "string",
@@ -38,18 +49,24 @@
     },
     "route_proposals": {
       "type": "array",
-      "items": {"type": "object"}
+      "items": {
+        "type": "object"
+      }
     },
     "collections": {
       "type": "object",
-      "additionalProperties": {"$ref": "#/$defs/collectionBinding"}
+      "additionalProperties": {
+        "$ref": "#/$defs/collectionBinding"
+      }
     },
     "defaults": {
       "type": "object"
     },
     "attraction_events": {
       "type": "object",
-      "additionalProperties": {"$ref": "#/$defs/attractionEvent"}
+      "additionalProperties": {
+        "$ref": "#/$defs/attractionEvent"
+      }
     },
     "meal_configs": {
       "type": "object",
@@ -68,11 +85,15 @@
     },
     "booking_tasks": {
       "type": "array",
-      "items": {"type": "object"}
+      "items": {
+        "type": "object"
+      }
     },
     "restaurant_research_version": {
-      "type": "integer",
-      "minimum": 3
+      "enum": [
+        3,
+        4
+      ]
     },
     "inventory_contract_version": {
       "type": "integer",
@@ -80,10 +101,53 @@
     },
     "planning": {
       "type": "object",
+      "allOf": [{
+        "if": {"required": ["research_depth_version"], "properties": {"research_depth_version": {"const": 1}}},
+        "then": {"properties": {
+          "transport_edges": {"type": "array", "items": {"$ref": "#/$defs/depthMetadata"}},
+          "intercity_options": {"type": "array", "items": {"$ref": "#/$defs/depthMetadata"}},
+          "meal_options": {"type": "array", "items": {"$ref": "#/$defs/depthMetadata"}},
+          "weather": {"type": "array", "items": {"$ref": "#/$defs/depthMetadata"}}
+        }}
+      }],
       "properties": {
+        "research_depth_version": {"const": 1},
+        "meal_options": {
+          "type": "array", "items": {"type": "object", "allOf": [{
+            "if": {"required": ["mode"], "properties": {"mode": {"const": "area"}}},
+            "then": {"$ref": "area-meal.schema.json"}
+          }]}
+        },
+        "lodging_options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{
+              "if": {"required": ["kind"], "properties": {"kind": {"const": "area"}}},
+              "then": {"$ref": "lodging-area.schema.json"}
+            }]
+          }
+        },
         "daily_routes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/dailyRoute"}
+          "items": {
+            "$ref": "#/$defs/dailyRoute"
+          }
+        },
+        "community_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "community-evidence.schema.json"
+          }
+        },
+        "community_evidence_conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "research_contract": {
+          "$ref": "research-contract.schema.json"
         }
       }
     },
@@ -92,19 +156,48 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["date", "events"],
+        "required": [
+          "date",
+          "events"
+        ],
         "properties": {
-          "date": {"type": "string", "format": "date"},
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
           "events": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["type"],
+              "required": [
+                "type"
+              ],
               "properties": {
                 "type": {
-                  "enum": ["attraction", "transport", "meal", "lodging", "rest", "note"]
+                  "enum": [
+                    "attraction",
+                    "transport",
+                    "meal",
+                    "lodging",
+                    "rest",
+                    "note",
+                    "food_walk"
+                  ]
+                },
+                "food_walk": {
+                  "$ref": "#/$defs/foodWalk"
+                },
+                "details": {
+                  "type": "array",
+                  "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
+                },
+                "tips": {
+                  "type": "array",
+                  "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
                 }
-              }
+              },
+              "allOf": [{"if": {"properties": {"type": {"const": "food_walk"}}, "required": ["type"]},
+                         "then": {"required": ["food_walk"]}}]
             }
           }
         }
@@ -112,83 +205,281 @@
     },
     "claims": {
       "type": "array",
-      "items": {"type": "object"}
+      "items": {
+        "type": "object"
+      }
     }
   },
   "$defs": {
+    "depthMetadata": {
+      "type": "object", "required": ["research_depth", "depth_reason", "decision_factors"],
+      "properties": {
+        "research_depth": {"enum": ["basic", "detailed"]},
+        "depth_reason": {"type": "string", "minLength": 1},
+        "decision_factors": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {
+          "enum": ["routine", "user_priority", "fixed_time", "limited_supply", "dietary_constraints", "complex_transfer", "weather_sensitive", "cost_tradeoff"]
+        }}
+      }
+    },
+    "foodWalk": {
+      "type": "object",
+      "required": [
+        "meal_type",
+        "entry",
+        "exit",
+        "food_items",
+        "budget_per_person",
+        "fallback"
+      ],
+      "properties": {
+        "meal_type": {
+          "enum": [
+            "小吃",
+            "午餐",
+            "晚餐"
+          ]
+        },
+        "entry": {
+          "$ref": "#/$defs/foodWalkPoint"
+        },
+        "exit": {
+          "$ref": "#/$defs/foodWalkPoint"
+        },
+        "food_items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "source_ids"
+            ],
+            "properties": {
+              "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+              "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}}
+            }
+          }
+        },
+        "budget_per_person": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fallback": {
+          "description": "新规划使用地点、地址和触发条件/应对安排；非空文字仅兼容旧行程。",
+          "oneOf": [
+            {"$ref": "#/$defs/diningFallback"},
+            {"type": "string", "minLength": 1, "pattern": "\\S"}
+          ]
+        },
+        "pet_note": {
+          "type": "string"
+        }
+      },
+      "allOf": [{"if": {"properties": {"meal_type": {"enum": ["午餐", "晚餐"]}}, "required": ["meal_type"]},
+                 "then": {"properties": {"food_items": {"minItems": 2}}}}]
+    },
+    "foodWalkPoint": {
+      "type": "object",
+      "required": ["name", "physical_address", "coordinates", "map_url"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "physical_address": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "coordinates": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "map_url": {"type": "string", "format": "uri", "pattern": "^https://"}
+      }
+    },
+    "diningFallback": {
+      "type": "object",
+      "required": ["name", "physical_address", "plan"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "physical_address": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "plan": {"type": "string", "minLength": 1, "pattern": "\\S"}
+      }
+    },
     "collectionBinding": {
       "type": "object",
-      "required": ["path"],
+      "required": [
+        "path"
+      ],
       "oneOf": [
         {
-          "required": ["task"],
-          "not": {"required": ["file"]}
+          "required": [
+            "task"
+          ],
+          "not": {
+            "required": [
+              "file"
+            ]
+          }
         },
         {
-          "required": ["file"],
-          "not": {"required": ["task"]}
+          "required": [
+            "file"
+          ],
+          "not": {
+            "required": [
+              "task"
+            ]
+          }
         }
       ],
       "properties": {
-        "task": {"type": "string", "minLength": 1},
-        "file": {"type": "string", "minLength": 1},
-        "path": {"type": "string"},
-        "id_key": {"type": "string", "minLength": 1},
+        "task": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string"
+        },
+        "id_key": {
+          "type": "string",
+          "minLength": 1
+        },
         "ids": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "patches": {"type": "object"},
+        "patches": {
+          "type": "object"
+        },
         "append": {
           "type": "array",
-          "items": {"type": "object"}
+          "items": {
+            "type": "object"
+          }
         }
       }
     },
     "attractionEvent": {
       "type": "object",
-      "required": ["event_id", "start", "end", "weather_id", "title"],
+      "required": [
+        "event_id",
+        "start",
+        "end",
+        "weather_id",
+        "title"
+      ],
       "properties": {
-        "event_id": {"type": "string", "minLength": 1},
-        "start": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
-        "end": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
-        "weather_id": {"type": "string", "minLength": 1},
-        "title": {"type": "string", "minLength": 1},
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+        },
+        "weather_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
         "checkpoint_order": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "checkpoint_overrides": {"type": "object"},
-        "entry": {"type": "object"},
-        "exit": {"type": "object"},
-        "overrides": {"type": "object"}
+        "checkpoint_overrides": {
+          "type": "object"
+        },
+        "entry": {
+          "type": "object"
+        },
+        "exit": {
+          "type": "object"
+        },
+        "overrides": {
+          "type": "object"
+        }
       }
     },
     "dailyRoute": {
       "type": "object",
-      "required": ["id", "date", "title", "stops"],
+      "required": [
+        "id",
+        "date",
+        "title",
+        "stops"
+      ],
       "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "date": {"type": "string", "format": "date"},
-        "title": {"type": "string", "minLength": 1},
-        "mode": {"enum": ["car", "bus", "walk"]},
-        "assumption": {"type": "string"},
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "date": {
+          "type": "string",
+          "format": "date"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "car",
+            "bus",
+            "walk",
+            "mixed"
+          ]
+        },
+        "assumption": {
+          "type": "string"
+        },
         "stops": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 18,
           "items": {
             "type": "object",
-            "required": ["name", "coordinates", "coordinate_system"],
+            "required": [
+              "name"
+            ],
             "properties": {
-              "event_id": {"type": "string", "minLength": 1},
-              "name": {"type": "string", "minLength": 1},
-              "coordinates": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?,-?[0-9]+(?:\\.[0-9]+)?$"},
-              "coordinate_system": {"const": "GCJ-02"},
-              "poi_id": {"type": "string", "minLength": 1},
-              "note": {"type": "string"}
+              "event_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "coordinates": {
+                "type": "string",
+                "pattern": "^-?[0-9]+(?:\\.[0-9]+)?,-?[0-9]+(?:\\.[0-9]+)?$"
+              },
+              "coordinate_system": {
+                "const": "GCJ-02"
+              },
+              "poi_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "arrival_mode": {
+                "type": "string",
+                "minLength": 1
+              },
+              "note": {
+                "type": "string"
+              }
             }
           }
         }

@@ -10,13 +10,14 @@ REPOSITORY_ROOT = ROOT.parents[1]
 
 
 class PluginLayoutTest(unittest.TestCase):
-    def test_only_five_user_visible_skills_are_registered(self) -> None:
+    def test_user_visible_skills_are_registered(self) -> None:
         skill_files = sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "skills").rglob("SKILL.md"))
         self.assertEqual(
             skill_files,
             [
                 "skills/amap-maps/SKILL.md",
                 "skills/flyai/SKILL.md",
+                "skills/food-discovery/SKILL.md",
                 "skills/travel-planning/SKILL.md",
                 "skills/variflight/SKILL.md",
                 "skills/xiaohongshu/SKILL.md",
@@ -79,7 +80,7 @@ class PluginLayoutTest(unittest.TestCase):
         if repository_ignore.is_file():
             ignored = repository_ignore.read_text(encoding="utf-8").splitlines()
             self.assertIn("**/config/sources.local.env", ignored)
-            self.assertTrue((ROOT / "config/sources.local.env").is_file())
+            # A distributable checkout must not require a private credential file.
         self.assertFalse((ROOT / ".travel-tools").exists())
 
     def test_provider_runtime_is_not_nested_inside_skills(self) -> None:

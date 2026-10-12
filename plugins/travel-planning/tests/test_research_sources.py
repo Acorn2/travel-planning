@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -313,17 +314,37 @@ class ResearchSourcesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "tokens.json"
             with patch.dict(os.environ, {"XHS_TOKEN_CACHE": str(cache)}, clear=False):
-                with patch.object(research_sources, "xhs_mcp_call", return_value=response):
+                with patch.object(
+                    research_sources,
+                    "xhs_mcp_call",
+                    side_effect=[{"text": "✅ 已登录\n用户名: test"}, response],
+                ) as call:
                     result = research_sources.xhs_search(args)
-                    call = research_sources.xhs_mcp_call.call_args
             self.assertNotIn("secret-token", json.dumps(result, ensure_ascii=False))
             self.assertEqual(result["results"][0]["note_id"], "note-1")
             self.assertEqual(
-                call.args[1]["filters"],
+                call.call_args_list[1].args[1]["filters"],
                 {"sort_by": "最新", "publish_time": "半年内"},
             )
             self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["notes"]["note-1"]["xsec_token"], "secret-token")
             self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
+    def test_xhs_search_defaults_do_not_click_upstream_filters(self) -> None:
+        parser = research_sources.build_parser()
+        args = parser.parse_args(["xhs-search", "--keyword", "宜昌 清江画廊", "--limit", "3"])
+        self.assertEqual(args.sort_by, "relevance")
+        self.assertEqual(args.publish_time, "all")
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "tokens.json"
+            with patch.dict(os.environ, {"XHS_TOKEN_CACHE": str(cache)}, clear=False):
+                with patch.object(
+                    research_sources,
+                    "xhs_mcp_call",
+                    side_effect=[{"text": "✅ 已登录"}, {"feeds": [], "count": 0}],
+                ) as call:
+                    result = research_sources.xhs_search(args)
+        self.assertEqual(call.call_args_list[1].args[1], {"keyword": "宜昌 清江画廊"})
+        self.assertEqual(result["count"], 0)
 
     def test_xhs_detail_reads_token_from_private_cache(self) -> None:
         response = {
@@ -336,7 +357,17 @@ class ResearchSourcesTest(unittest.TestCase):
                     "time": 1789855200000,
                     "user": {"nickname": "旅行者"},
                     "interactInfo": {"likedCount": "10"},
-                }
+                },
+                "comments": [
+                    {
+                        "id": "comment-1",
+                        "content": "早上去人少很多，建议从东门进。",
+                        "createTime": 1789855200000,
+                        "likeCount": "8",
+                        "subCommentCount": "1",
+                        "userInfo": {"nickname": "实测游客"},
+                    }
+                ],
             }
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -346,13 +377,200 @@ class ResearchSourcesTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.dict(os.environ, {"XHS_TOKEN_CACHE": str(cache)}, clear=False):
-                with patch.object(research_sources, "xhs_mcp_call", return_value=response) as call:
+                with patch.object(
+                    research_sources,
+                    "xhs_mcp_call",
+                    side_effect=[{"text": "✅ 已登录\n用户名: test"}, response],
+                ) as call:
                     result = research_sources.xhs_detail(Namespace(note_id="note-1"))
-            self.assertEqual(call.call_args.args[0], "get_feed_detail")
-            self.assertEqual(call.call_args.args[1]["xsec_token"], "cached-token")
+            self.assertEqual(call.call_args_list[0].args[0], "check_login_status")
+            self.assertEqual(call.call_args_list[1].args[0], "get_feed_detail")
+            self.assertEqual(call.call_args_list[1].args[1]["xsec_token"], "cached-token")
             self.assertNotIn("token", json.dumps(result, ensure_ascii=False).lower())
             self.assertEqual(result["note"]["title"], "路线实测")
             self.assertEqual(result["note"]["description_excerpt"], "从东门进入步行较少")
+            self.assertEqual(result["comment_collection"]["mode"], "sampled")
+            self.assertEqual(result["comments"][0]["comment_id"], "comment-1")
+            self.assertEqual(result["comments"][0]["author"], "实测游客")
+            self.assertEqual(result["comments"][0]["content"], "早上去人少很多，建议从东门进。")
+
+    def test_xhs_detail_can_load_more_comments_and_replies(self) -> None:
+        response = {
+            "data": {
+                "note": {
+                    "noteId": "note-1",
+                    "title": "路线实测",
+                    "desc": "从东门进入步行较少",
+                    "time": 1789855200000,
+                    "user": {"nickname": "旅行者"},
+                },
+                "comments": [
+                    {
+                        "commentId": "comment-1",
+                        "content": "工作日早上更舒服。",
+                        "create_time": 1789855200000,
+                        "like_count": "5",
+                        "reply_count": "1",
+                        "user": {"nickname": "实测游客"},
+                        "replies": [
+                            {
+                                "id": "reply-1",
+                                "text": "收到，谢谢提醒。",
+                                "time": 1789855200000,
+                                "user": {"nickName": "另一位游客"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+        args = Namespace(
+            note_id="note-1",
+            all_comments=True,
+            comment_limit=30,
+            include_replies=True,
+            reply_limit=8,
+            scroll_speed="slow",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "tokens.json"
+            cache.write_text(
+                json.dumps({"version": 1, "notes": {"note-1": {"xsec_token": "cached-token"}}}),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"XHS_TOKEN_CACHE": str(cache)}, clear=False):
+                with patch.object(
+                    research_sources,
+                    "xhs_mcp_call",
+                    side_effect=[{"text": "✅ 已登录\n用户名: test"}, response],
+                ) as call:
+                    result = research_sources.xhs_detail(args)
+        self.assertEqual(call.call_args_list[1].args[0], "get_feed_detail")
+        self.assertEqual(
+            call.call_args_list[1].args[1],
+            {
+                "feed_id": "note-1",
+                "xsec_token": "cached-token",
+                "load_all_comments": True,
+                "limit": 30,
+                "click_more_replies": True,
+                "reply_limit": 8,
+                "scroll_speed": "slow",
+            },
+        )
+        self.assertEqual(result["comment_collection"]["mode"], "expanded")
+        self.assertEqual(result["comment_collection"]["top_level_limit"], 30)
+        self.assertEqual(result["comments"][0]["replies"][0]["comment_id"], "reply-1")
+        self.assertEqual(result["comments"][0]["replies"][0]["author"], "另一位游客")
+        self.assertEqual(result["comment_analysis"]["input_count"], 2)
+
+    def test_xhs_comment_insights_filter_generic_comments(self) -> None:
+        result = research_sources.build_xhs_comment_insights(
+            [
+                {
+                    "comment_id": "generic-1",
+                    "content": "好美，值得去！",
+                    "published_at": "2026-09-24T10:00:00+08:00",
+                    "likes": "100",
+                }
+            ],
+            now=datetime(2026, 9, 25, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["comment_insights"], [])
+        self.assertEqual(result["comment_analysis"]["filtered_count"], 1)
+
+    def test_xhs_comment_insights_prioritize_latest_specific_evidence(self) -> None:
+        result = research_sources.build_xhs_comment_insights(
+            [
+                {
+                    "comment_id": "old-1",
+                    "content": "我1月去过，东门施工，建议从南门进。",
+                    "published_at": "2026-01-15T10:00:00+08:00",
+                    "likes": "1200",
+                },
+                {
+                    "comment_id": "new-1",
+                    "content": "我9月20日现场去的时候，东门施工，建议从南门进，排队约20分钟。",
+                    "published_at": "2026-09-20T10:00:00+08:00",
+                    "likes": "3",
+                },
+            ],
+            now=datetime(2026, 9, 25, tzinfo=timezone.utc),
+        )
+        self.assertEqual(len(result["comment_insights"]), 1)
+        insight = result["comment_insights"][0]
+        self.assertEqual(insight["claim"].startswith("我9月20日现场"), True)
+        self.assertTrue(insight["latest_evidence_at"].startswith("2026-09-20T"))
+        self.assertEqual(insight["support_count"], 2)
+        self.assertEqual(insight["confidence"], "medium")
+
+    def test_xhs_comment_insights_mark_conflicting_current_claims(self) -> None:
+        result = research_sources.build_xhs_comment_insights(
+            [
+                {
+                    "comment_id": "need-booking",
+                    "content": "我9月20日去的时候必须预约，现场要核验身份证。",
+                    "published_at": "2026-09-20T10:00:00+08:00",
+                    "likes": "8",
+                },
+                {
+                    "comment_id": "no-booking",
+                    "content": "我9月21日去的时候不需要预约，直接进就行。",
+                    "published_at": "2026-09-21T10:00:00+08:00",
+                    "likes": "5",
+                },
+            ],
+            now=datetime(2026, 9, 25, tzinfo=timezone.utc),
+        )
+        self.assertEqual(len(result["comment_insights"]), 1)
+        insight = result["comment_insights"][0]
+        self.assertEqual(insight["contradiction_count"], 1)
+        self.assertEqual(insight["confidence"], "low")
+        self.assertTrue(insight["needs_official_recheck"])
+        self.assertEqual(len(result["needs_recheck"]), 1)
+
+    def test_xhs_comment_insights_do_not_count_duplicate_evidence_twice(self) -> None:
+        comments = [
+            {
+                "comment_id": "copy-1",
+                "content": "我9月20日去的时候东门施工，建议从南门进。",
+                "published_at": "2026-09-20T10:00:00+08:00",
+                "likes": "20",
+            },
+            {
+                "comment_id": "copy-2",
+                "content": "我9月20日去的时候东门施工，建议从南门进。",
+                "published_at": "2026-09-21T10:00:00+08:00",
+                "likes": "30",
+            },
+        ]
+        result = research_sources.build_xhs_comment_insights(
+            comments,
+            now=datetime(2026, 9, 25, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["comment_analysis"]["duplicate_count"], 1)
+        self.assertEqual(result["comment_insights"][0]["support_count"], 1)
+
+    def test_xhs_search_stops_before_search_when_login_is_required(self) -> None:
+        args = Namespace(
+            keyword="杭州 早餐",
+            sort_by="relevance",
+            note_type="all",
+            publish_time="all",
+            search_scope="all",
+            location="all",
+            limit=10,
+        )
+        with patch.object(
+            research_sources,
+            "xhs_mcp_call",
+            return_value={"text": "❌ 未登录"},
+        ) as call:
+            with self.assertRaises(research_sources.AdapterError) as error:
+                research_sources.xhs_search(args)
+        self.assertEqual(error.exception.failure_kind, "login_required")
+        self.assertIn("setup.py login", str(error.exception))
+        call.assert_called_once_with("check_login_status", {}, timeout=60)
 
     def test_xhs_excerpt_is_bounded(self) -> None:
         excerpt = research_sources.xhs_excerpt("  " + "体验很好 " * 100, limit=32)
@@ -474,24 +692,47 @@ class ResearchSourcesTest(unittest.TestCase):
         self.assertFalse(provider.query.call_args.kwargs["query"]["supplier_capacity_filter_supported"])
 
     def test_provider_query_stores_snapshot_when_workspace_target_is_given(self) -> None:
-        args = Namespace(
-            timeout=30, limit=10, consent_external_data=True,
-            workspace="/tmp/travel-workspace", task_id="route-data",
-        )
         snapshot = {"schema_version": "travel-source-snapshot/v1", "snapshot_id": "0" * 24}
         provider = MagicMock()
         provider.query.return_value = snapshot
-        with patch.object(research_sources, "adapter", return_value=provider):
-            with patch.object(research_sources, "store_source_snapshot") as store:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve() / "trip"
+            research_sources.execution_log.write_json(workspace / "manifest.json", {"workspace_version": 1})
+            research_sources.execution_log.write_json(workspace / "assignments/route-data.json", {"domain": "route-data"})
+            args = Namespace(timeout=30, limit=10, consent_external_data=True,
+                             workspace=str(workspace), task_id="route-data")
+            with patch.object(research_sources, "adapter", return_value=provider), patch.object(research_sources, "store_source_snapshot") as store:
                 result = research_sources.provider_query(
                     args, "fliggy_flyai", "train", "search-train",
                     {"origin": "北京", "destination": "上海"},
                     {"origin": "北京", "destination": "上海"},
                 )
-        self.assertIs(result, snapshot)
-        store.assert_called_once_with(
-            research_sources.Path("/tmp/travel-workspace"), "route-data", snapshot
-        )
+                self.assertIs(result, snapshot)
+                store.assert_called_once_with(workspace, "route-data", snapshot)
+                spans = list((workspace / "state/execution/spans").glob("*.json"))
+                self.assertEqual(len(spans), 1)
+                self.assertEqual(json.loads(spans[0].read_text())["status"], "success")
+
+    def test_provider_query_requires_valid_workspace_before_contacting_supplier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args = Namespace(timeout=30, limit=10, workspace=directory, task_id="route-data")
+            with patch.object(research_sources, "adapter") as adapter:
+                with self.assertRaises(research_sources.execution_log.ExecutionError):
+                    research_sources.provider_query(args, "fliggy_flyai", "train", "search-train", {}, {})
+                adapter.assert_not_called()
+
+    def test_provider_query_requires_assignment_with_matching_product_domain(self) -> None:
+        for domain in (None, "stay-food"):
+            with tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory).resolve() / "trip"
+                research_sources.execution_log.write_json(workspace / "manifest.json", {"workspace_version": 1})
+                if domain is not None:
+                    research_sources.execution_log.write_json(workspace / "assignments/route-data.json", {"domain": domain})
+                args = Namespace(timeout=30, limit=10, workspace=str(workspace), task_id="route-data")
+                with self.subTest(domain=domain), patch.object(research_sources, "adapter") as adapter:
+                    with self.assertRaises(research_sources.AdapterError):
+                        research_sources.provider_query(args, "fliggy_flyai", "train", "search-train", {}, {})
+                    adapter.assert_not_called()
 
 
 if __name__ == "__main__":

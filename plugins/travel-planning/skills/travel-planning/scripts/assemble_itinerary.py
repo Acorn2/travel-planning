@@ -5,10 +5,22 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
+
+EVIDENCE_SPEC = importlib.util.spec_from_file_location("research_evidence", Path(__file__).with_name("research_evidence.py"))
+assert EVIDENCE_SPEC and EVIDENCE_SPEC.loader
+research_evidence = importlib.util.module_from_spec(EVIDENCE_SPEC)
+EVIDENCE_SPEC.loader.exec_module(research_evidence)
+
+EXECUTION_SPEC = importlib.util.spec_from_file_location("execution_log", Path(__file__).with_name("execution_log.py"))
+assert EXECUTION_SPEC and EXECUTION_SPEC.loader
+execution_log = importlib.util.module_from_spec(EXECUTION_SPEC)
+EXECUTION_SPEC.loader.exec_module(execution_log)
 
 
 ALLOWED_ACTION_TYPES = {
@@ -25,6 +37,7 @@ OUTPUT_COLLECTIONS = (
     "readiness", "attractions", "transport_edges", "intercity_options",
     "lodging_options", "restaurants", "restaurant_snapshots",
     "meal_baseline_routes", "meal_route_evaluations", "meal_options", "weather",
+    "community_evidence",
 )
 
 
@@ -103,17 +116,22 @@ def normalize_actions(
 
 
 def money(value: Any) -> str:
-    return "待官方核验" if value is None else f"¥{value}"
+    if value is None:
+        return "待官方核验"
+    text = str(value).strip()
+    return text if text.startswith("¥") else f"¥{text}"
 
 
 def normalize_cost(item: dict[str, Any]) -> dict[str, Any]:
     role = str(item.get("pricing_role") or "optional")
+    unit_price = item.get("unit_price_cny", item.get("unit_price"))
+    subtotal = item.get("subtotal_cny", item.get("subtotal"))
     return {
-        "name": item.get("name"),
+        "name": item.get("name") or ("成人基础门票" if item.get("kind") == "base_ticket" else "费用"),
         "kind": item.get("kind") or ("base_ticket" if role == "baseline" else "optional_experience"),
-        "unit_price": money(item.get("unit_price_cny")),
+        "unit_price": money(unit_price),
         "quantity": item.get("quantity", 1),
-        "subtotal": money(item.get("subtotal_cny")),
+        "subtotal": money(subtotal),
         "pricing_role": "baseline" if role == "baseline" else ("alternative" if role == "alternative" else "optional"),
         "required": role == "baseline",
         "status": item.get("status") or "to_recheck",
@@ -175,14 +193,39 @@ def normalize_intercity(item: dict[str, Any], defaults: dict[str, Any]) -> dict[
 
 def normalize_lodging(item: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(item)
+    if item.get("kind") == "area":
+        try:
+            research_evidence.validate_lodging_area(item)
+        except ValueError as error:
+            raise AssemblyError(str(error)) from error
+        result["location_verification"] = {"status": "area_anchor", "source_ids": item.get("source_ids") or []}
+        result["action_links"] = normalize_actions(
+            item.get("action_links") or [], "map", defaults["map_provider"],
+            "区域代表地标，选定酒店后按实际地址调整", defaults["checked_at"],
+        )
+        return result
     quote = result.get("quote") or {}
-    result["area"] = item.get("area_anchor") or item.get("district")
-    result["price"] = (
-        f"快照约¥{quote.get('amount_per_room_per_night_cny')}/间夜；"
-        f"2间2晚约¥{quote.get('two_rooms_two_nights_estimate_cny')}"
-        if quote.get("amount_per_room_per_night_cny") is not None else "待重新查询"
+    price = item.get("price") or {}
+    result["area"] = item.get("area_anchor") or item.get("district") or (item.get("location") or {}).get("address")
+    if isinstance(price, dict) and price.get("unit_price") is not None:
+        rooms = (item.get("occupancy") or {}).get("rooms") or 1
+        nights = item.get("nights") or price.get("nights") or 1
+        result["price"] = (
+            f"平台报价约¥{price['unit_price']}/间夜；"
+            f"{rooms}间×{nights}晚约¥{price.get('subtotal', '待核')}（预订前重新查询）"
+        )
+    elif quote.get("amount_per_room_per_night_cny") is not None:
+        result["price"] = (
+            f"快照约¥{quote['amount_per_room_per_night_cny']}/间夜；"
+            f"2间2晚约¥{quote.get('two_rooms_two_nights_estimate_cny')}"
+        )
+    else:
+        result["price"] = "待重新查询"
+    storage = item.get("luggage_storage") or {}
+    result["luggage_storage"] = (
+        (storage.get("policy") if isinstance(storage, dict) else str(storage))
+        or item.get("luggage_storage_policy") or "入住前确认"
     )
-    result["luggage_storage"] = (item.get("luggage_storage") or {}).get("policy") or "入住前确认"
     location = item.get("location") or {}
     result["location_verification"] = {
         "status": "verified", "checked_at": location.get("poi_verified_at") or defaults["checked_at"],
@@ -413,9 +456,63 @@ def load_source_snapshots(workspace: Path, task_results: dict[str, dict[str, Any
     return list(snapshots.values())
 
 
+def load_community_state(workspace: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    research_path = workspace / "state" / "research.json"
+    if not research_path.is_file():
+        return [], []
+    state = read_json(research_path)
+    global_state = state.get("global_state") or {}
+    evidence = global_state.get("community_evidence") or []
+    conflicts = global_state.get("community_evidence_conflicts") or []
+    if not isinstance(evidence, list) or not all(isinstance(item, dict) for item in evidence):
+        raise AssemblyError("state/research.json.global_state.community_evidence 必须是对象数组")
+    if not isinstance(conflicts, list) or not all(isinstance(item, dict) for item in conflicts):
+        raise AssemblyError(
+            "state/research.json.global_state.community_evidence_conflicts 必须是对象数组"
+        )
+    return deepcopy(evidence), deepcopy(conflicts)
+
+
+def community_evidence_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(item.get("target_entity_id") or ""),
+        str(item.get("target_entity_type") or ""),
+        str(item.get("topic") or "").strip().casefold(),
+        str(item.get("insight") or item.get("claim") or "").strip().casefold(),
+    )
+
+
+def unique_community_evidence(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise AssemblyError("community_evidence 必须是对象数组")
+        key = community_evidence_key(item)
+        if not all(key):
+            raise AssemblyError("community_evidence 缺少目标实体、主题或洞察")
+        current = merged.get(key)
+        if current is None:
+            merged[key] = deepcopy(item)
+            continue
+        current["source_ids"] = list(dict.fromkeys([
+            *(current.get("source_ids") or []), *(item.get("source_ids") or []),
+        ]))
+        for field in ("support_count", "contradiction_count"):
+            current[field] = max(int(current.get(field) or 0), int(item.get(field) or 0))
+        if item.get("latest_evidence_at") and (
+            not current.get("latest_evidence_at")
+            or str(item["latest_evidence_at"]) > str(current["latest_evidence_at"])
+        ):
+            current["latest_evidence_at"] = item["latest_evidence_at"]
+    return list(merged.values())
+
+
 def collect_sources(workspace: Path, allowed_ids: list[str] | None = None) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
-    for path in sorted((workspace / "sources").glob("*.jsonl")):
+    # Source catalogs are grouped by research domain (for example
+    # sources/food-discovery.jsonl and sources/attractions/main.jsonl).
+    # Include nested catalogs so assembled evidence can resolve to real notes.
+    for path in sorted((workspace / "sources").rglob("*.jsonl")):
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if not line.strip():
                 continue
@@ -435,6 +532,7 @@ def collect_sources(workspace: Path, allowed_ids: list[str] | None = None) -> li
                     **({"provider_poi_ids": item["provider_poi_ids"]} if item.get("provider_poi_ids") else {}),
                     **({"kind": item["kind"]} if item.get("kind") else {}),
                     **({"provider": item["provider"]} if item.get("provider") else {}),
+                    **{key: item[key] for key in ("acquisition", "accessed", "publisher", "published_at", "origin_url", "independence_key") if key in item},
                 }
     if allowed_ids is None:
         return list(merged.values())
@@ -492,10 +590,6 @@ def normalize_collections(
             if not selected or not binding or not snapshot:
                 raise AssemblyError(f"餐窗主选绑定不完整：{meal_id}")
             constraints = deepcopy(candidate_set.get("constraints") or {})
-            budget = constraints.get("budget_per_person_cny") or {}
-            signal_price = next(
-                (signal.get("per_person") for signal in snapshot.get("platform_signals") or [] if signal.get("per_person")), None
-            )
             item.update({
                 "research_status": "complete",
                 # Keep the research-contract value unless the plan explicitly replaces
@@ -504,14 +598,6 @@ def normalize_collections(
                 "time_window": config.get("contract_time_window") or candidate_set.get("time_window") or item.get("time_window"),
                 "meal_type": config.get("meal_type") or item.get("meal_type"),
                 "name": config.get("name") or item.get("name") or "顺路正餐",
-                "location": (selected.get("location") or {}).get("physical_address") or selected.get("name"),
-                "signature_dishes": selected.get("signature_dishes") or ["以到店菜单为准"],
-                "per_person": signal_price or f"约¥{budget.get('min', '?')}–{budget.get('max', '?')}/人（规划带）",
-                "opening_hours": (snapshot.get("operations") or {}).get("opening_hours") or "出发前复核",
-                "queue_note": (snapshot.get("operations") or {}).get("queue") or item.get("switch_condition"),
-                "why_here": item.get("selection_summary"),
-                "fallback": item.get("switch_condition") or "主选不可用时切换结构化备选",
-                "fallback_rule": item.get("switch_condition") or "主选不可用时切换结构化备选",
                 "previous_anchor": deepcopy(candidate_set.get("previous_anchor")),
                 "next_anchor": deepcopy(candidate_set.get("next_anchor")),
                 "constraints": constraints,
@@ -523,6 +609,11 @@ def normalize_collections(
                 ),
             })
         item = deep_merge(item, config.get("overrides") or {})
+        if item.get("mode") == "area":
+            try:
+                research_evidence.validate_area_meal(item)
+            except ValueError as error:
+                raise AssemblyError(f"区域餐窗 {meal_id}：{error}") from error
         meals.append(item)
     output["meal_options"] = meals
     return output, attraction_events
@@ -534,6 +625,27 @@ def validate_plan(workspace: Path, plan: dict[str, Any]) -> None:
     for field in ("trip", "workflow", "collections", "days"):
         if field not in plan:
             raise AssemblyError(f"plan 缺少 {field}")
+    for day in plan["days"]:
+        for event in day.get("events") or []:
+            try:
+                research_evidence.validate_event_prose(event)
+            except ValueError as error:
+                raise AssemblyError(str(error)) from error
+            if event.get("type") == "food_walk":
+                try:
+                    research_evidence.validate_food_walk_structure(event.get("food_walk"))
+                except ValueError as error:
+                    raise AssemblyError(f"逛吃事件 {event.get('id') or '未注明'}：{error}") from error
+    manifest_path = workspace / "manifest.json"
+    if manifest_path.exists() and read_json(manifest_path).get("query_design_version") == 1:
+        if ((plan.get("planning") or {}).get("research_contract") or {}).get("query_design_version") != 1:
+            raise AssemblyError("新研究工作区必须提供 query_design_version=1，保留逐次真实查询记录")
+    if manifest_path.exists() and read_json(manifest_path).get("research_contract_version") == 1:
+        if ((plan.get("planning") or {}).get("research_contract") or {}).get("version") != 1:
+            raise AssemblyError("新研究工作区必须提供 planning.research_contract，不能退回旧契约跳过网页研究")
+        version = (plan.get("planning") or {}).get("restaurant_research_version", plan.get("restaurant_research_version", 4))
+        if version != 4:
+            raise AssemblyError("新研究工作区的餐饮必须使用 restaurant_research_version=4")
     selected_route = read_json(workspace / "selected-route.json")
     if plan["workflow"].get("selected_route_id") != selected_route.get("id"):
         raise AssemblyError("plan.selected_route_id 与 workspace 已确认路线不一致")
@@ -552,6 +664,7 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
     defaults = default_settings(plan)
     collections, task_results = load_collections(workspace, plan)
     normalized, attraction_events = normalize_collections(collections, defaults, plan)
+    state_community_evidence, state_community_conflicts = load_community_state(workspace)
 
     days = []
     seen_event_ids: set[str] = set()
@@ -566,6 +679,10 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
                 event = deep_merge(attraction_events[attraction_id], spec.get("overrides") or {})
             else:
                 event = deepcopy(spec)
+            try:
+                research_evidence.validate_event_prose(event)
+            except ValueError as error:
+                raise AssemblyError(str(error)) from error
             event_id = str(event.get("id") or "")
             if not event_id:
                 raise AssemblyError("日程事件缺少 id")
@@ -585,13 +702,35 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
     booking_tasks.extend(deepcopy(plan.get("booking_tasks") or []))
 
     planning = {
-        "restaurant_research_version": plan.get("restaurant_research_version", 3),
+        "restaurant_research_version": plan.get("restaurant_research_version", 4 if (plan.get("planning") or {}).get("research_contract") else 3),
         "inventory_contract_version": plan.get("inventory_contract_version", 1),
         "source_snapshots": load_source_snapshots(workspace, task_results),
         **{name: normalized.get(name, []) for name in OUTPUT_COLLECTIONS},
+        "community_evidence": unique_community_evidence([
+            *state_community_evidence,
+            *(normalized.get("community_evidence") or []),
+        ]),
+        "community_evidence_conflicts": state_community_conflicts,
         "booking_tasks": booking_tasks,
     }
-    planning = deep_merge(planning, plan.get("planning") or {})
+    plan_planning = deepcopy(plan.get("planning") or {})
+    explicit_community_evidence = plan_planning.pop("community_evidence", [])
+    explicit_community_conflicts = plan_planning.pop("community_evidence_conflicts", [])
+    planning = deep_merge(planning, plan_planning)
+    planning["community_evidence"] = unique_community_evidence([
+        *(planning.get("community_evidence") or []),
+        *(explicit_community_evidence or []),
+    ])
+    planning["community_evidence_conflicts"] = [
+        *(planning.get("community_evidence_conflicts") or []),
+        *(explicit_community_conflicts or []),
+    ]
+    for meal in planning.get("meal_options") or []:
+        if meal.get("mode") == "area":
+            try:
+                research_evidence.validate_area_meal(meal)
+            except ValueError as error:
+                raise AssemblyError(f"区域餐窗 {meal.get('id') or '未注明'}：{error}") from error
     return {
         "trip": deepcopy(plan["trip"]), "workflow": deepcopy(plan["workflow"]),
         "route_proposals": deepcopy(plan.get("route_proposals") or []),
@@ -621,9 +760,10 @@ def main() -> int:
         return 0
     plan_path = args.plan.resolve() if args.plan else workspace / "state" / "itinerary-plan.json"
     output = args.output.resolve() if args.output else workspace / "artifacts" / "itinerary.json"
-    payload = assemble(workspace, plan_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with execution_log.measured(workspace, "assembly", "assemble"):
+        payload = assemble(workspace, plan_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(output)
     return 0
 

@@ -161,25 +161,25 @@
         "id": "daily-route-2026-10-17",
         "date": "2026-10-17",
         "title": "酒店—湖滨—断桥—灵隐片区",
-        "mode": "car",
-        "assumption": "用于串联当天全部停靠点的导览顺序；分段出行方式仍以详细行程为准。",
+        "mode": "mixed",
+        "assumption": "停靠顺序用于快速查看当天安排；各段时长与导航目的地以详细行程为准。",
         "stops": [
           {"event_id": "e-d1-r1", "name": "龙翔桥附近酒店", "coordinates": "120.165438,30.255247", "coordinate_system": "GCJ-02", "note": "出发"},
-          {"event_id": "e-d1-a1", "name": "湖滨公园入口", "coordinates": "120.156800,30.254900", "coordinate_system": "GCJ-02"},
-          {"event_id": "e-d1-a1", "name": "断桥东侧", "coordinates": "120.148270,30.263600", "coordinate_system": "GCJ-02"},
-          {"event_id": "e-d1-m1", "name": "灵隐片区", "coordinates": "120.102000,30.240000", "coordinate_system": "GCJ-02", "note": "午餐与后续游览"}
+          {"event_id": "e-d1-a1", "name": "湖滨公园入口", "coordinates": "120.156800,30.254900", "coordinate_system": "GCJ-02", "arrival_mode": "步行"},
+          {"event_id": "e-d1-a1", "name": "断桥东侧", "coordinates": "120.148270,30.263600", "coordinate_system": "GCJ-02", "arrival_mode": "步行"},
+          {"event_id": "e-d1-m1", "name": "灵隐片区", "coordinates": "120.102000,30.240000", "coordinate_system": "GCJ-02", "arrival_mode": "公交或网约车", "note": "午餐与后续游览"}
         ]
       },
       {
         "id": "daily-route-2026-10-18",
         "date": "2026-10-18",
         "title": "龙井村—午餐—酒店片区",
-        "mode": "car",
-        "assumption": "用于串联当天全部停靠点的导览顺序；步行和返程交通仍按详细行程执行。",
+        "mode": "mixed",
+        "assumption": "停靠顺序用于快速查看当天安排；步行和返程交通以详细行程为准。",
         "stops": [
           {"event_id": "e-d2-a2", "name": "龙井村公交站附近", "coordinates": "120.104000,30.223000", "coordinate_system": "GCJ-02", "note": "徒步起终点"},
-          {"event_id": "e-d2-m2", "name": "龙井村午餐点", "coordinates": "120.103500,30.223500", "coordinate_system": "GCJ-02"},
-          {"event_id": "e-d2-r3", "name": "龙翔桥酒店片区", "coordinates": "120.165438,30.255247", "coordinate_system": "GCJ-02", "note": "取行李"}
+          {"event_id": "e-d2-m2", "name": "龙井村午餐点", "coordinates": "120.103500,30.223500", "coordinate_system": "GCJ-02", "arrival_mode": "步行"},
+          {"event_id": "e-d2-r3", "name": "龙翔桥酒店片区", "coordinates": "120.165438,30.255247", "coordinate_system": "GCJ-02", "arrival_mode": "公交/地铁或打车", "note": "取行李"}
         ]
       }
     ],

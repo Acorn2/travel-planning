@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Multi-source research contract",
+  "type": "object",
+  "required": [
+    "version",
+    "capabilities",
+    "queries",
+    "decisions"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "query_design_version": {
+      "const": 1
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "web_search",
+        "xiaohongshu",
+        "amap"
+      ],
+      "additionalProperties": {
+        "enum": [
+          "ready",
+          "unavailable"
+        ]
+      }
+    },
+    "web_unavailable_reason": {
+      "type": "string"
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "channel",
+          "query",
+          "checked_at",
+          "status",
+          "scope"
+        ],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "stage": {"enum": ["discovery", "detail", "verification"]},
+          "purpose": {"type": "string", "minLength": 1},
+          "provider": {"type": "string", "minLength": 1},
+          "tool": {"type": "string", "minLength": 1},
+          "parameters": {"type": "object", "minProperties": 1},
+          "outcome": {"type": "string", "minLength": 1},
+          "result_count": {"type": "integer", "minimum": 0},
+          "parent_query_id": {"type": "string", "minLength": 1},
+          "channel": {
+            "enum": [
+              "web_search",
+              "browser",
+              "mcp",
+              "api",
+              "user"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "checked_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "success",
+              "no_results",
+              "failed"
+            ]
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "play",
+              "eat",
+              "operations",
+              "route",
+              "general"
+            ]
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "user_value",
+          "tradeoff",
+          "evidence"
+        ],
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "user_value": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tradeoff": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/evidence"
+            }
+          },
+          "consensus": {
+            "type": "boolean"
+          },
+          "conflicts": {
+            "type": "array"
+          },
+          "resolution": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [{
+    "if": {"required": ["query_design_version"], "properties": {"query_design_version": {"const": 1}}},
+    "then": {"properties": {"queries": {"items": {
+      "required": ["id", "stage", "purpose", "provider", "tool", "parameters", "outcome"]
+    }}}}
+  }],
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "required": [
+        "aspect",
+        "summary",
+        "status",
+        "source_ids",
+        "checked_at"
+      ],
+      "properties": {
+        "aspect": {
+          "enum": [
+            "identity",
+            "menu",
+            "operations",
+            "admission",
+            "experience",
+            "route"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "verified",
+            "platform_reported",
+            "community_reported",
+            "partial",
+            "estimated",
+            "to_recheck"
+          ]
+        },
+        "checked_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "applicable_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "critical": {
+          "type": "boolean"
+        },
+        "recheck_at": {
+          "type": "string"
+        },
+        "action_links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "pattern": "^https://"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

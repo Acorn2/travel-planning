@@ -1,6 +1,6 @@
 {
   "schema_version": "travel-research-result/v2",
-  "template_version": 5,
+  "template_version": 7,
   "template_digest": "COPY_FROM_ASSIGNMENT",
   "task_id": "COPY_FROM_ASSIGNMENT",
   "status": "complete",
@@ -33,5 +33,7 @@
   "event_bindings": [],
   "constraints": [],
   "unresolved": [],
-  "source_ids": []
+  "source_ids": [],
+  "community_evidence": [],
+  "restaurant_research_version": 4
 }

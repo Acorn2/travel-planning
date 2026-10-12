@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { enhancePage } from "./pageEnhancements.js";
+import TripTools from "./TripTools.vue";
 
 defineProps({
   panels: {
@@ -15,23 +16,24 @@ defineProps({
 });
 
 const views = [
-  { id: "detail", label: "详细行程", panel: "detail-view" },
-  { id: "overview", label: "行程一览", panel: "overview-view" },
-  { id: "routes", label: "路线图", panel: "route-view" },
+  { id: "focus", label: "玩什么·吃什么", panel: "focus-view" },
+  { id: "overview", label: "全程概览", panel: "overview-view" },
+  { id: "detail", label: "每日行程", panel: "detail-view" },
+  { id: "prepare", label: "出发准备", panel: "prepare-view" },
 ];
-const activeView = ref("detail");
+const activeView = ref("focus");
 const tabElements = ref([]);
 let pageEnhancements = null;
 
 function applyView() {
   document.documentElement.dataset.itineraryView = activeView.value;
-  if (pageEnhancements) pageEnhancements.viewChanged(activeView.value);
 }
 
 function selectView(view, focus = false) {
   activeView.value = view.id;
   if (window.history && window.history.replaceState) {
-    window.history.replaceState(null, "", `#${view.panel}`);
+    const day = view.id === "detail" ? document.querySelector("details.day[open]") : null;
+    window.history.replaceState(null, "", `#${day ? day.id : view.panel}`);
   }
   if (focus) {
     nextTick(() => {
@@ -53,10 +55,40 @@ function onKeydown(event, index) {
   selectView(views[next], true);
 }
 
+function openDay(id, scroll = true) {
+  selectView(views.find((view) => view.id === "detail"));
+  nextTick(() => {
+    pageEnhancements.showDay(id, scroll);
+    window.history.replaceState(null, "", `#${id}`);
+  });
+}
+
+function restoreHash() {
+  const hash = window.location.hash;
+  if (/^#day-\d+$/.test(hash)) {
+    openDay(hash.slice(1));
+    return;
+  }
+  const hashView = views.find((view) => `#${view.panel}` === hash);
+  activeView.value = hash === "#route-view" ? "overview" : (hashView ? hashView.id : "focus");
+  if (hash === "#route-view") {
+    nextTick(() => {
+      const route = document.getElementById("route-view");
+      if (route) {
+        route.closest("details").open = true;
+        route.scrollIntoView();
+      }
+    });
+  }
+}
+
 onMounted(() => {
-  const hashView = views.find((view) => `#${view.panel}` === window.location.hash);
-  if (hashView) activeView.value = hashView.id;
-  pageEnhancements = enhancePage();
+  pageEnhancements = enhancePage({
+    onSelectDay: openDay,
+    onSelectView: (id) => selectView(views.find((view) => view.id === id)),
+  });
+  restoreHash();
+  window.addEventListener("hashchange", restoreHash);
   document.documentElement.dataset.itineraryEnhanced = "true";
   applyView();
 });
@@ -64,6 +96,7 @@ onMounted(() => {
 watch(activeView, applyView, { flush: "post" });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("hashchange", restoreHash);
   if (pageEnhancements) pageEnhancements.destroy();
   delete document.documentElement.dataset.itineraryEnhanced;
   delete document.documentElement.dataset.itineraryView;
@@ -71,6 +104,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <Teleport to="#itinerary-tools">
+    <TripTools />
+  </Teleport>
   <Teleport to="#itinerary-view-controls">
     <nav class="view-switcher" role="tablist" aria-label="行程展示方式">
       <a
@@ -90,6 +126,14 @@ onBeforeUnmount(() => {
     </nav>
   </Teleport>
   <section
+    v-show="activeView === 'focus'"
+    :hidden="activeView !== 'focus'"
+    id="focus-view"
+    data-itinerary-view="focus"
+    aria-labelledby="focus-heading"
+    v-html="panels['focus-view']"
+  />
+  <section
     v-show="activeView === 'detail'"
     :hidden="activeView !== 'detail'"
     id="detail-view"
@@ -102,17 +146,17 @@ onBeforeUnmount(() => {
     id="overview-view"
     class="itinerary-overview"
     data-itinerary-view="overview"
-    aria-labelledby="overview-heading"
+    aria-labelledby="handbook-heading"
     v-html="panels['overview-view']"
   />
   <section
-    v-show="activeView === 'routes'"
-    :hidden="activeView !== 'routes'"
-    id="route-view"
-    class="itinerary-routes"
-    data-itinerary-view="routes"
-    aria-labelledby="route-heading"
-    v-html="panels['route-view']"
+    v-show="activeView === 'prepare'"
+    :hidden="activeView !== 'prepare'"
+    id="prepare-view"
+    class="itinerary-prepare"
+    data-itinerary-view="prepare"
+    aria-labelledby="prepare-heading"
+    v-html="panels['prepare-view']"
   />
-  <div v-show="activeView !== 'routes'" class="itinerary-tail" v-html="tailHtml" />
+  <div class="itinerary-tail" v-html="tailHtml" />
 </template>

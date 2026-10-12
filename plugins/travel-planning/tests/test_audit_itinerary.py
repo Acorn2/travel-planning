@@ -43,6 +43,45 @@ class AuditItineraryTest(unittest.TestCase):
         self.assertEqual(result["restaurant_audit"]["used_meal_slot_count"], 3)
         self.assertEqual(result["restaurant_audit"]["restaurant_count"], 5)
 
+    def test_invalid_event_prose_is_blocked_without_crashing(self) -> None:
+        for field in ("details", "tips"):
+            for value in ([{"plan": "原始对象"}], {"plan": "原始对象"}, 60, True, [""]):
+                data = self.load_example()
+                data["days"][0]["events"][0][field] = value
+                with self.subTest(field=field, value=value):
+                    self.assertTrue(any(field in item for item in audit_itinerary.audit(data)["blocking"]))
+
+    def test_meal_windows_accept_chinese_and_english_labels(self) -> None:
+        for label in ("午餐", "lunch"):
+            data = self.load_example()
+            for meal in data["planning"]["meal_options"]:
+                if meal["meal_type"] == "午餐":
+                    meal["meal_type"] = label
+            with self.subTest(label=label):
+                self.assertEqual(audit_itinerary.audit(data)["blocking"], [])
+
+    def test_other_meal_labels_do_not_satisfy_lunch_window(self) -> None:
+        for label in ("晚餐", "dinner", "茶歇", "breakfast"):
+            data = self.load_example()
+            for meal in data["planning"]["meal_options"]:
+                if meal["meal_type"] == "午餐":
+                    meal["meal_type"] = label
+            with self.subTest(label=label):
+                self.assertTrue(any("午餐窗口" in item for item in audit_itinerary.audit(data)["blocking"]))
+
+    def test_dinner_window_requires_matching_meal_label(self) -> None:
+        for label in ("晚餐", "dinner", "午餐", "lunch", "茶歇"):
+            data = self.load_example()
+            day = data["days"][0]
+            meal_event = next(event for event in day["events"] if event.get("meal_id") == "m1")
+            day["events"] = [meal_event]
+            meal_event.update(time="18:30", end_time="19:30")
+            meal = next(item for item in data["planning"]["meal_options"] if item["id"] == "m1")
+            meal.update(meal_type=label, time_window="18:30–19:30")
+            with self.subTest(label=label):
+                gaps = [item for item in audit_itinerary.audit(data)["blocking"] if "晚餐窗口" in item]
+                self.assertEqual(bool(gaps), label not in ("晚餐", "dinner"))
+
     def test_detects_time_overlap(self) -> None:
         data = self.load_example()
         data["days"][0]["events"][2]["time"] = "10:00"
@@ -111,6 +150,83 @@ class AuditItineraryTest(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertTrue(any("排序覆盖" in item for item in result["blocking"]))
         self.assertTrue(result["inventory_audit"]["transport_coverage_gaps"])
+
+    def test_audits_community_evidence_source_closure_and_recheck(self) -> None:
+        data = self.load_example()
+        restaurant_id = data["planning"]["restaurants"][0]["id"]
+        data["sources"].append({
+            "id": "xhs-restaurant-1",
+            "title": "小红书评论",
+            "url": "https://example.com/xhs-restaurant-1",
+            "kind": "community",
+            "provider": "xiaohongshu",
+        })
+        data["planning"]["community_evidence"] = [{
+            "target_entity_id": restaurant_id,
+            "target_entity_type": "restaurant",
+            "provider": "xiaohongshu",
+            "checked_at": "2026-09-25T10:00:00+08:00",
+            "topic": "价格",
+            "insight": "人均约100元",
+            "support_count": 2,
+            "contradiction_count": 0,
+            "community_confidence": "medium",
+            "needs_official_recheck": True,
+            "source_ids": ["xhs-restaurant-1"],
+        }]
+        result = audit_itinerary.audit(data)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["community_audit"]["evidence_count"], 1)
+        self.assertEqual(result["community_audit"]["official_recheck_warning_count"], 1)
+        self.assertTrue(any("仍需官方" in item for item in result["warnings"]))
+
+    def test_final_plan_rejects_xhs_homepage_as_note_source(self) -> None:
+        data = self.load_example()
+        data["workflow"]["phase"] = "final"
+        data["sources"].append({
+            "id": "xhs-note-homepage",
+            "title": "小红书：宜昌美食笔记",
+            "url": "https://www.xiaohongshu.com/",
+            "kind": "community",
+            "provider": "小红书",
+        })
+        result = audit_itinerary.audit(data)
+        self.assertIn("仅链接平台首页", " ".join(result["blocking"]))
+        self.assertIn("玩法体验依据", " ".join(result["warnings"]))
+
+    def test_final_plan_blocks_medium_confidence_community_conflict(self) -> None:
+        data = self.load_example()
+        restaurant_id = data["planning"]["restaurants"][0]["id"]
+        data["sources"].append({
+            "id": "xhs-restaurant-1",
+            "title": "小红书评论",
+            "url": "https://example.com/xhs-restaurant-1",
+            "kind": "community",
+            "provider": "xiaohongshu",
+        })
+        data["planning"]["community_evidence"] = [{
+            "target_entity_id": restaurant_id,
+            "target_entity_type": "restaurant",
+            "provider": "xiaohongshu",
+            "checked_at": "2026-09-25T10:00:00+08:00",
+            "topic": "排队与拥挤",
+            "insight": "周末需要排队",
+            "support_count": 3,
+            "contradiction_count": 0,
+            "community_confidence": "medium",
+            "needs_official_recheck": True,
+            "source_ids": ["xhs-restaurant-1"],
+        }]
+        data["planning"]["community_evidence_conflicts"] = [{
+            "target_entity_id": restaurant_id,
+            "target_entity_type": "restaurant",
+            "topic": "排队与拥挤",
+            "selected_value": {"community_confidence": "medium"},
+            "previous_source_ids": ["xhs-restaurant-1"],
+        }]
+        result = audit_itinerary.audit(data)
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(any("不得保持 medium" in item for item in result["blocking"]))
 
 
 if __name__ == "__main__":

@@ -126,19 +126,56 @@ def _health(endpoint: str = DEFAULT_ENDPOINT, timeout: float = 2.0) -> bool:
 
 def _read_pid() -> int | None:
     try:
-        return int(PID_FILE.read_text(encoding="utf-8").strip())
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        return pid if 1 < pid <= 2**31 - 1 else None
     except (OSError, ValueError):
         return None
 
 
 def _process_alive(pid: int | None) -> bool:
-    if pid is None:
+    if pid is None or pid <= 1 or pid > 2**31 - 1:
         return False
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True
     except OSError:
         return False
+
+
+def _process_identity(pid: int | None) -> dict[str, Any] | None:
+    if pid is None or pid <= 1:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
+            capture_output=True, text=True, check=False, timeout=2,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    parts = result.stdout.strip().split(None, 5)
+    if result.returncode != 0 or len(parts) != 6:
+        return None
+    return {"pid": pid, "started_at": " ".join(parts[:5]), "command": parts[5]}
+
+
+def _managed_identity(pid: int | None) -> dict[str, Any] | None:
+    try:
+        record = json.loads(PID_FILE.with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    expected = f"{_binary('server')} -headless=true -port=127.0.0.1:18060"
+    if not isinstance(record, dict) or record.get("pid") != pid or record.get("command") != expected:
+        return None
+    current = _process_identity(pid)
+    return current if current is not None and current == record else None
+
+
+def _clear_process_record() -> None:
+    PID_FILE.unlink(missing_ok=True)
+    PID_FILE.with_suffix(".json").unlink(missing_ok=True)
 
 
 def _secure_state_files() -> None:
@@ -147,7 +184,7 @@ def _secure_state_files() -> None:
         STATE_DIR.chmod(0o700)
     except OSError:
         pass
-    for path in (COOKIE_FILE, PID_FILE, LOG_FILE):
+    for path in (COOKIE_FILE, PID_FILE, PID_FILE.with_suffix(".json"), LOG_FILE):
         if path.is_file():
             try:
                 path.chmod(0o600)
@@ -190,7 +227,7 @@ def status(_: argparse.Namespace) -> dict[str, Any]:
         "service": {
             "healthy": healthy,
             "managed_pid": pid,
-            "managed_process_alive": _process_alive(pid),
+            "managed_process_alive": _process_alive(pid) and _managed_identity(pid) is not None,
             "endpoint": f"{DEFAULT_ENDPOINT}/mcp",
         },
         "cookie_file_present": COOKIE_FILE.is_file(),
@@ -203,6 +240,8 @@ def start(args: argparse.Namespace) -> dict[str, Any]:
         raise SetupError("尚未安装或发布包校验失败；先运行 setup.py install")
     if _health():
         return status(args)
+    if _process_alive(_read_pid()):
+        raise SetupError("PID 记录中的进程仍在运行；先核对 status 和 logs，不会覆盖进程记录或重复启动")
     _secure_state_files()
     environment = os.environ.copy()
     environment["COOKIES_PATH"] = str(COOKIE_FILE)
@@ -216,7 +255,16 @@ def start(args: argparse.Namespace) -> dict[str, Any]:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    identity = _process_identity(process.pid)
+    expected = f"{_binary('server')} -headless=true -port=127.0.0.1:18060"
+    if identity is None or identity["command"] != expected:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+        raise SetupError("无法记录新服务的进程身份；已停止本次启动，检查本机 ps 命令是否可用")
+    PID_FILE.with_suffix(".json").write_text(json.dumps(identity), encoding="utf-8")
     PID_FILE.write_text(f"{process.pid}\n", encoding="utf-8")
+    _secure_state_files()
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
         if _health():
@@ -236,16 +284,33 @@ def start(args: argparse.Namespace) -> dict[str, Any]:
 def stop(_: argparse.Namespace) -> dict[str, Any]:
     pid = _read_pid()
     if not _process_alive(pid):
-        PID_FILE.unlink(missing_ok=True)
+        _clear_process_record()
         return {"status": "stopped", "managed_process_found": False}
     assert pid is not None
-    os.kill(pid, signal.SIGTERM)
+    identity = _managed_identity(pid)
+    if identity is None:
+        raise SetupError("PID 缺少匹配的进程身份或已被复用；不会停止该进程。请人工核对旧服务，确认停止后再 start")
+    # Recheck just before signaling; a stale PID alone never authorizes a stop.
+    if _process_identity(pid) != identity:
+        raise SetupError("进程身份已变化；不会发送停止信号")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _clear_process_record()
+        return {"status": "stopped", "managed_process_found": False}
+    except OSError as error:
+        raise SetupError(f"无法停止受管进程 {pid}") from error
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and _process_alive(pid):
+    while True:
+        current = _process_identity(pid)
+        if current != identity:
+            break
+        if time.monotonic() >= deadline:
+            raise SetupError(f"进程 {pid} 未在 10 秒内停止")
         time.sleep(0.2)
-    if _process_alive(pid):
-        raise SetupError(f"进程 {pid} 未在 10 秒内停止")
-    PID_FILE.unlink(missing_ok=True)
+    if current is None and _process_alive(pid):
+        raise SetupError("已发送停止信号，但无法确认进程退出；保留运行记录，请人工核对")
+    _clear_process_record()
     return {"status": "stopped", "managed_process_found": True, "pid": pid}
 
 

@@ -9,97 +9,284 @@
     "restaurant_id",
     "applicable_date",
     "time_window",
-    "platform_signals",
-    "community_consensus",
     "operations",
     "checked_at",
     "action_links",
     "source_ids"
   ],
   "properties": {
-    "schema_version": {"const": "restaurant-source-snapshot/v1"},
-    "snapshot_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"},
-    "restaurant_id": {"type": "string", "minLength": 1},
-    "applicable_date": {"type": "string", "format": "date"},
-    "time_window": {"type": "string", "minLength": 1},
+    "schema_version": {
+      "enum": [
+        "restaurant-source-snapshot/v1",
+        "restaurant-source-snapshot/v2"
+      ]
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+    },
+    "restaurant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "applicable_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "time_window": {
+      "type": "string",
+      "minLength": 1
+    },
     "status": {
-      "enum": ["verified", "platform_reported", "community_reported", "partial", "to_recheck", "unavailable"]
+      "enum": [
+        "verified",
+        "platform_reported",
+        "community_reported",
+        "partial",
+        "to_recheck",
+        "unavailable"
+      ]
     },
     "platform_signals": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["platform", "status", "checked_at", "source_ids"],
+        "required": [
+          "platform",
+          "status",
+          "checked_at",
+          "source_ids"
+        ],
         "properties": {
-          "platform": {"type": "string", "minLength": 1},
-          "rating": {"type": ["string", "number", "null"]},
-          "scale": {"type": ["string", "number", "null"]},
-          "review_count": {"type": ["integer", "null"], "minimum": 0},
-          "per_person": {"type": ["string", "null"]},
-          "status": {"enum": ["verified", "platform_reported", "to_recheck", "unavailable"]},
-          "unavailable_reason": {"type": ["string", "null"]},
-          "checked_at": {"type": "string", "minLength": 1},
-          "source_ids": {"type": "array", "items": {"type": "string"}}
+          "platform": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rating": {
+            "type": [
+              "string",
+              "number",
+              "null"
+            ]
+          },
+          "scale": {
+            "type": [
+              "string",
+              "number",
+              "null"
+            ]
+          },
+          "review_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "per_person": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "verified",
+              "platform_reported",
+              "to_recheck",
+              "unavailable"
+            ]
+          },
+          "unavailable_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checked_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
         "additionalProperties": true
       }
     },
     "community_consensus": {
       "type": "object",
-      "required": ["platform", "status", "query_runs", "notes_considered", "recent_note_count", "confidence", "checked_at", "references"],
+      "required": [
+        "platform",
+        "status",
+        "query_runs",
+        "notes_considered",
+        "recent_note_count",
+        "confidence",
+        "checked_at",
+        "references"
+      ],
       "properties": {
-        "platform": {"type": "string"},
-        "notes_considered": {"type": "integer", "minimum": 0},
-        "recent_note_count": {"type": "integer", "minimum": 0},
-        "positive": {"type": "array", "items": {"type": "string"}},
-        "negative": {"type": "array", "items": {"type": "string"}},
-        "promotion_risk": {"enum": ["low", "medium", "high", "unknown"]},
-        "confidence": {"enum": ["low", "medium"]},
-        "status": {"enum": ["available", "partial", "unavailable"]},
+        "platform": {
+          "type": "string"
+        },
+        "notes_considered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recent_note_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "positive": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "negative": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "promotion_risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "unknown"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium"
+          ]
+        },
+        "status": {
+          "enum": [
+            "available",
+            "partial",
+            "unavailable"
+          ]
+        },
         "query_runs": {
           "type": "array",
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["keyword", "executed_at"],
+            "required": [
+              "keyword",
+              "executed_at"
+            ],
             "properties": {
-              "keyword": {"type": "string", "minLength": 1},
-              "executed_at": {"type": "string", "minLength": 1},
-              "filters": {"type": "object"}
+              "keyword": {
+                "type": "string",
+                "minLength": 1
+              },
+              "executed_at": {
+                "type": "string",
+                "minLength": 1
+              },
+              "filters": {
+                "type": "object"
+              }
             },
             "additionalProperties": true
           }
         },
-        "failure_kind": {"enum": ["auth_required", "risk_control", "service_unavailable", "no_results"]},
-        "unavailable_reason": {"type": ["string", "null"]},
+        "failure_kind": {
+          "enum": [
+            "auth_required",
+            "risk_control",
+            "service_unavailable",
+            "no_results"
+          ]
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "manual_action_links": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["label", "url"],
+            "required": [
+              "label",
+              "url"
+            ],
             "properties": {
-              "label": {"type": "string", "minLength": 1},
-              "url": {"type": "string", "pattern": "^https://"}
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https://"
+              }
             },
             "additionalProperties": true
           }
         },
-        "recheck_at": {"type": ["string", "null"]},
-        "checked_at": {"type": "string", "minLength": 1},
+        "recheck_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checked_at": {
+          "type": "string",
+          "minLength": 1
+        },
         "references": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["note_id", "title", "url", "author", "published_at", "checked_at", "source_id"],
+            "required": [
+              "note_id",
+              "title",
+              "url",
+              "author",
+              "published_at",
+              "checked_at",
+              "source_id"
+            ],
             "properties": {
-              "note_id": {"type": "string", "minLength": 1},
-              "title": {"type": "string", "minLength": 1},
-              "url": {"type": "string", "pattern": "^https://"},
-              "author": {"type": "string", "minLength": 1},
-              "published_at": {"type": "string", "format": "date"},
-              "checked_at": {"type": "string", "minLength": 1},
-              "source_id": {"type": "string", "minLength": 1}
+              "note_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https://"
+              },
+              "author": {
+                "type": "string",
+                "minLength": 1
+              },
+              "published_at": {
+                "type": "string",
+                "format": "date"
+              },
+              "checked_at": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_id": {
+                "type": "string",
+                "minLength": 1
+              }
             },
             "additionalProperties": true
           }
@@ -109,13 +296,80 @@
     },
     "operations": {
       "type": "object",
-      "required": ["opening_hours", "reservation", "queue", "parking", "status", "checked_at", "recheck_at"],
+      "required": [
+        "opening_hours",
+        "reservation",
+        "queue",
+        "parking",
+        "status",
+        "checked_at",
+        "recheck_at"
+      ],
       "additionalProperties": true
     },
-    "checked_at": {"type": "string", "minLength": 1},
-    "expires_at": {"type": ["string", "null"]},
-    "action_links": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+    "checked_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "action_links": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object"
+      }
+    },
+    "source_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "research-contract.schema.json#/$defs/evidence"
+      }
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "restaurant-source-snapshot/v1"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "community_consensus",
+          "platform_signals"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "restaurant-source-snapshot/v2"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "evidence",
+          "expires_at"
+        ]
+      }
+    }
+  ]
 }

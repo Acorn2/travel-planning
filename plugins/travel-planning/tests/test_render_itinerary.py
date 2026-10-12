@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -42,6 +44,94 @@ class RenderItineraryTest(unittest.TestCase):
     def load_example(self) -> dict:
         return json.loads((SKILL_ROOT / "assets" / "example-itinerary.json").read_text(encoding="utf-8"))
 
+    def test_event_prose_rejects_raw_objects_and_scalar_values(self) -> None:
+        for field in ("details", "tips"):
+            for value in ({"plan": "原始对象"}, [{"plan": "原始对象"}], "单段文字", [1], [None], [" "]):
+                data = self.load_example()
+                data["days"][0]["events"][0][field] = value
+                with self.subTest(field=field, value=value):
+                    for render in (render_itinerary.build, render_itinerary.render_portable_guide):
+                        with self.assertRaisesRegex(ValueError, field):
+                            render(data)
+                    with self.assertRaisesRegex(ValueError, field):
+                        render_itinerary.render_event(data["days"][0]["events"][0], 0)
+
+    def test_event_prose_remains_readable_and_html_escaped(self) -> None:
+        data = self.load_example()
+        event = data["days"][0]["events"][0]
+        event.update(details=["执行说明 <script>"], tips=["现场提醒 & 复核"])
+        for render in (render_itinerary.build, render_itinerary.render_portable_guide):
+            html = render(data)
+            self.assertIn("执行说明 &lt;script&gt;", html)
+            self.assertIn("现场提醒 &amp; 复核", html)
+
+    def test_cover_dates_are_compact_without_changing_source_data(self) -> None:
+        self.assertEqual(render_itinerary.compact_date_range("2026-10-12 — 2026-10-16"), "2026.10.12—10.16")
+        self.assertEqual(render_itinerary.compact_date_range("2026-12-30 — 2027-01-02"), "2026.12.30—2027.01.02")
+        self.assertEqual(render_itinerary.compact_date_range("日期待定"), "日期待定")
+
+    def test_uncredited_event_image_is_not_promoted_to_cover(self) -> None:
+        self.assertEqual(render_itinerary.first_event_visual([{"events": [{
+            "type": "attraction", "images": [{"url": "https://example.com/photo.jpg"}]
+        }]}]), {})
+
+    def test_default_handbook_summarizes_days_without_repeating_event_cards(self) -> None:
+        data = self.load_example()
+        html = render_itinerary.build(data)
+        summary = html.split('<section class="handbook-overview"', 1)[1].split('<details class="reference-details">', 1)[0]
+        self.assertEqual(summary.count('class="handbook-day"'), len(data["days"]))
+        self.assertNotIn('class="event ', summary)
+        self.assertNotIn('class="restaurant-candidate ', summary)
+        self.assertIn('href="#day-1" data-day-target="day-1"', summary)
+        self.assertIn('for="itinerary-view-detail"', summary)
+        self.assertIn('id="full-overview"', html)
+        self.assertEqual(html.count('id="overview-view"'), 1)
+
+    def test_daily_disclosures_keep_all_events_but_expand_only_first_day(self) -> None:
+        data = self.load_example()
+        html = render_itinerary.build(data)
+        days = re.findall(r'<details class="day" id="day-(\d+)"( open)?>', html)
+        self.assertEqual(len(days), len(data["days"]))
+        self.assertEqual([day for day, opened in days if opened], ["0"])
+        self.assertEqual(len(re.findall(r'<article class="event event-', html)), sum(len(day["events"]) for day in data["days"]))
+
+    def test_routine_compression_preserves_park_experiences_and_hard_requirements(self) -> None:
+        self.assertTrue(render_itinerary.is_routine_event({"type": "rest", "title": "早餐与准备"}))
+        self.assertFalse(render_itinerary.is_routine_event({"type": "rest", "title": "人民公园喝茶、慢走"}))
+        self.assertFalse(render_itinerary.is_routine_event({"type": "note", "title": "机场值机安检", "booking_task_ids": ["hard-requirement"]}))
+        html = render_itinerary.render_event({"type": "note", "title": "机场值机安检", "details": ["晚点则取消下午景点"], "time": "09:00"}, 1)
+        self.assertIn('event-compact', html)
+        self.assertIn('晚点则取消下午景点', html)
+
+    def test_preparation_uses_deadlines_and_does_not_claim_research_is_booked(self) -> None:
+        html = render_itinerary.render_preparation({
+            "booking_tasks": [
+                {"title": "较晚预约", "deadline": "2026-10-12T18:00:00+08:00", "priority": "book_now", "status": "to_recheck"},
+                {"title": "较早预约", "deadline": "2026-10-09T18:00:00+08:00", "status": "to_recheck"},
+            ],
+            "readiness": [{"category": "lodging", "status": "verified", "summary": "已核对酒店位置"}],
+        })
+        self.assertLess(html.index("较早预约"), html.index("较晚预约"))
+        self.assertIn("2026-10-09 18:00", html)
+        self.assertIn("信息已核验", html)
+        self.assertNotIn("已预订", html)
+        self.assertNotIn("to_recheck", html)
+
+    def test_restaurant_evidence_is_collapsed_without_losing_routes(self) -> None:
+        data = self.load_example()
+        meal = data["planning"]["meal_options"][0]
+        html = render_itinerary.render_meal_candidates(
+            meal,
+            {item["id"]: item for item in data["planning"]["restaurants"]},
+            {item["snapshot_id"]: item for item in data["planning"]["restaurant_snapshots"]},
+            {item["id"]: item for item in data["planning"]["meal_route_evaluations"]},
+        )
+        self.assertIn('<details class="restaurant-more"><summary>', html)
+        self.assertIn('class="restaurant-candidate recommended" open', html)
+        self.assertNotIn('class="restaurant-candidate restaurant-candidate-backup" open', html)
+        self.assertIn('灵隐片区上一站出口 → 灵隐杭帮面馆 A', html)
+        self.assertEqual(render_itinerary.approximate_minutes(8.72), "约9分钟")
+
     def test_readiness_is_rendered(self) -> None:
         html = render_itinerary.build(self.load_example())
         self.assertIn("西湖经典线", html)
@@ -63,13 +153,15 @@ class RenderItineraryTest(unittest.TestCase):
     def test_page_can_switch_between_detail_and_dense_overview(self) -> None:
         html = render_itinerary.build(self.load_example())
         self.assertIn('id="itinerary-view-controls"', html)
-        self.assertIn('id="itinerary-view-detail" checked', html)
-        self.assertIn('<label for="itinerary-view-detail">详细行程</label>', html)
-        self.assertIn('<label for="itinerary-view-overview">行程一览</label>', html)
-        self.assertIn('<label for="itinerary-view-routes">路线图</label>', html)
+        self.assertIn('id="itinerary-view-focus" checked', html)
+        self.assertIn('<label for="itinerary-view-detail">每日行程</label>', html)
+        self.assertIn('<label for="itinerary-view-overview">全程概览</label>', html)
+        self.assertIn('<label for="itinerary-view-prepare">出发准备</label>', html)
+        self.assertIn('id="itinerary-tools"', html)
+        self.assertNotIn('data-print-itinerary type="button">打印 / 保存 PDF</button>', html)
         self.assertIn('id="detail-view" data-itinerary-view="detail"', html)
         self.assertIn('id="overview-view" data-itinerary-view="overview"', html)
-        self.assertIn('id="route-view" data-itinerary-view="routes"', html)
+        self.assertIn('id="prepare-view" data-itinerary-view="prepare"', html)
         self.assertNotIn('data-itinerary-view="overview" hidden', html)
         self.assertNotIn('data-itinerary-view="routes" hidden', html)
         self.assertIn('[data-itinerary-view][hidden] *::before', html)
@@ -80,6 +172,52 @@ class RenderItineraryTest(unittest.TestCase):
         self.assertIn('`ArrowLeft`,`ArrowRight`,`Home`,`End`', html)
         self.assertIn('#itinerary-view-overview:checked', html)
         self.assertNotIn('?.', html)
+
+    def test_portable_pdf_keeps_every_event_without_research_cards(self) -> None:
+        data = self.load_example()
+        html = render_itinerary.render_portable_guide(data)
+        self.assertEqual(html.count('class="portable-day"'), len(data["days"]))
+        self.assertEqual(html.count('data-portable-event='), sum(len(day["events"]) for day in data["days"]))
+        self.assertIn('id="portable-preparation"', html)
+        self.assertNotIn('id="prepare-view"', html)
+        self.assertNotIn('class="restaurant-candidate ', html)
+        self.assertNotIn('class="inventory-proof"', html)
+        self.assertNotIn('class="restaurant-signals"', html)
+
+    def test_portable_pdf_preserves_entry_cutoffs_fallback_and_booking_deadline(self) -> None:
+        data = {"days": [{"date": "2026-10-10", "events": [{
+            "id": "museum", "type": "attraction", "title": "博物馆",
+            "attraction_id": "museum", "booking_task_ids": ["ticket"],
+            "admission": {"last_entry": "16:00", "entry_requirement": "带身份证", "notice": "公告冲突须复核"},
+            "execution": {"entry": {"name": "东门", "physical_address": "东门路8号"}, "exit": {"name": "南门"}, "leave_by": "17:00", "fallback": "迟到则取消"},
+            "preparation": ["准备预约码"],
+            "map_url": "https://uri.amap.com/poidetail?poiid=ABC&src=travel",
+        }]}], "planning": {"booking_tasks": [{"id": "ticket", "deadline": "10月9日18:00前"}]}}
+        html = render_itinerary.render_portable_guide(data)
+        for value in ["东门路8号", "东门", "南门", "16:00", "17:00", "带身份证", "准备预约码", "公告冲突须复核", "迟到则取消", "10月9日18:00前"]:
+            self.assertIn(value, html)
+        self.assertIn('data-print-map="博物馆"', html)
+        self.assertIn('poiid=ABC&amp;src=travel', html)
+
+    def test_portable_pdf_keeps_primary_restaurant_and_locatable_backup(self) -> None:
+        data = self.load_example()
+        meal = data["planning"]["meal_options"][0]
+        restaurants = {r["id"]: r for r in data["planning"]["restaurants"]}
+        html = render_itinerary.render_portable_guide(data)
+        for candidate_id in [meal["selected_candidate_id"], *meal["fallback_candidate_ids"]]:
+            restaurant = restaurants[candidate_id]
+            self.assertIn(restaurant["name"], html)
+            self.assertIn(restaurant["location"]["physical_address"], html)
+        self.assertIn(meal["fallback_rule"], html)
+
+    def test_portable_pdf_keeps_lodging_actions_and_required_ticket_total(self) -> None:
+        data = {"days": [{"events": [
+            {"id": "checkout", "type": "lodging", "title": "办理退房并寄存行李", "lodging_id": "hotel"},
+            {"id": "ticket", "type": "attraction", "title": "入馆", "cost_summary": "成人基础票两人合计", "cost_items": [{"name": "成人门票", "quantity": 2, "subtotal": "¥100", "required": True}]},
+        ]}], "planning": {"lodging_options": [{"id": "hotel", "name": "示例酒店", "location": {"physical_address": "示例路8号"}}]}}
+        html = render_itinerary.render_portable_guide(data)
+        for value in ["办理退房并寄存行李", "示例酒店", "示例路8号", "成人门票 ×2，合计 ¥100", "成人基础票两人合计"]:
+            self.assertIn(value, html)
 
     def test_vue_frontend_is_inlined_into_one_progressively_enhanced_html(self) -> None:
         html = render_itinerary.build(self.load_example())
@@ -97,7 +235,7 @@ class RenderItineraryTest(unittest.TestCase):
         self.assertIn(".itinerary-overview{max-width:none!important}", html)
         self.assertIn("main{padding-left:10px;padding-right:10px}", html)
 
-    def test_route_view_renders_one_complete_map_per_day(self) -> None:
+    def test_route_view_renders_ordered_stops_per_day(self) -> None:
         html = render_itinerary.build(self.load_example())
         start = html.index('<section class="itinerary-routes"')
         end = html.index('<details class="sources"', start)
@@ -111,13 +249,12 @@ class RenderItineraryTest(unittest.TestCase):
         self.assertIn("湖滨公园入口", route_view[first_day:second_day])
         self.assertIn("断桥东侧", route_view[first_day:second_day])
         self.assertIn("灵隐片区", route_view[first_day:second_day])
-        self.assertIn("4 个站点 · 1 条路线", route_view[first_day:second_day])
+        self.assertIn("4 个停靠点", route_view[first_day:second_day])
         self.assertIn("龙井村—午餐—酒店片区", route_view[second_day:])
-        self.assertIn("3 个站点 · 1 条路线", route_view[second_day:])
-        self.assertEqual(route_view.count('class="route-map"'), 2)
-        self.assertEqual(route_view.count('class="route-map-frame"'), 2)
-        self.assertIn("via%5B0%5D%5Blnglat%5D=120.156800%2C30.254900", route_view)
-        self.assertIn("via%5B1%5D%5Bname%5D=%E6%96%AD%E6%A1%A5%E4%B8%9C%E4%BE%A7", route_view)
+        self.assertIn("3 个停靠点", route_view[second_day:])
+        self.assertEqual(route_view.count('class="route-stop-list"'), 2)
+        self.assertNotIn("<iframe", route_view)
+        self.assertNotIn("via%5B", route_view)
         self.assertNotIn('class="event ', route_view)
         self.assertNotIn('class="overview-table"', route_view)
 
@@ -129,8 +266,8 @@ class RenderItineraryTest(unittest.TestCase):
             data["planning"]["daily_routes"],
         )
         second_day = html.index("D2 · 周日 · 2026-10-18")
-        self.assertIn("暂无路线", html[second_day:])
-        self.assertIn("当天没有可展示的完整高德路线。", html[second_day:])
+        self.assertIn("暂无停靠点", html[second_day:])
+        self.assertIn("当天没有可展示的停靠顺序。", html[second_day:])
 
     def test_overview_adapts_facts_and_omits_heavy_detail_content(self) -> None:
         html = render_itinerary.build(self.load_example())
@@ -176,7 +313,7 @@ class RenderItineraryTest(unittest.TestCase):
         data = self.load_example()
         add_inventory_binding(data)
         html = render_itinerary.build(data)
-        self.assertIn("实时酒旅来源", html)
+        self.assertIn("报价与核验依据", html)
         self.assertIn("飞猪 FlyAI · G1234", html)
         self.assertIn("查看供应商结果", html)
 
@@ -426,7 +563,7 @@ class RenderItineraryTest(unittest.TestCase):
         self.assertIn("片儿川、小笼", timeline_html)
         self.assertIn("餐厅推荐", timeline_html)
         self.assertIn("综合推荐", timeline_html)
-        self.assertNotIn("主选候位超过20分钟时切换餐厅 B", html)
+        self.assertIn("主选候位超过20分钟时切换餐厅 B", html)
         self.assertNotIn("主选评分样本更多，额外绕行4分钟", timeline_html)
 
     def test_meal_contract_omits_candidate_summary_duplicates(self) -> None:
@@ -464,12 +601,12 @@ class RenderItineraryTest(unittest.TestCase):
         self.assertIn("综合推荐", html)
         self.assertNotIn('class="restaurant-backup-strip"', html)
         self.assertNotIn('class="restaurant-backup-link"', html)
-        self.assertIn('<div class="restaurant-backup-carousel" aria-label="备选餐厅完整信息">', html)
-        self.assertIn('<details class="restaurant-candidate restaurant-candidate-backup" open>', html)
+        self.assertIn('<div class="restaurant-backup-carousel" aria-label="备选餐厅，展开查看">', html)
+        self.assertIn('<details class="restaurant-candidate restaurant-candidate-backup">', html)
         self.assertIn('<span class="restaurant-role">备选</span><div><h4>灵隐杭帮面馆 B</h4>', html)
         self.assertIn("4.6/5 · 820条评价", html)
         self.assertIn("<b>小红书推荐 · 3 篇近期门店原帖</b>", html)
-        self.assertIn("候选总计22分钟 · 基准18分钟 · 额外绕行4分钟", html)
+        self.assertIn("<dt>额外绕行</dt><dd>约4分钟</dd>", html)
         self.assertIn("灵隐片区上一站出口 → 灵隐杭帮面馆 A", html)
         self.assertIn("灵隐杭帮面馆 A → 下午路线入口", html)
         self.assertIn("浙江省杭州市西湖区灵隐路灵隐片区公交站出口 → 浙江省杭州市西湖区灵隐路88号A座", html)
@@ -497,7 +634,7 @@ class RenderItineraryTest(unittest.TestCase):
         lunch_section = html.split('data-meal-id="m1"', 1)[1].split("</section>", 1)[0]
         self.assertNotIn('<div class="restaurant-comparison-head"><span class="section-label">餐厅推荐</span><div class="actions">', lunch_section)
         self.assertIn('在高德查看门店 ↗</a><a class="action-link"', lunch_section)
-        self.assertIn('class="restaurant-candidate restaurant-candidate-backup" open', lunch_section)
+        self.assertIn('class="restaurant-candidate restaurant-candidate-backup"', lunch_section)
         self.assertIn('class="restaurant-backup-carousel"', lunch_section)
         self.assertNotIn('class="restaurant-backup-strip"', lunch_section)
         self.assertNotIn("查看灵隐片区餐厅候选", html)
@@ -544,7 +681,7 @@ class RenderItineraryTest(unittest.TestCase):
         html = render_itinerary.build(self.load_example())
         self.assertNotIn('class="checkpoint-meal"', html)
         self.assertIn("龙井村茶歇点", html)
-        self.assertIn("候选总计6分钟 · 基准5分钟 · 额外绕行1分钟", html)
+        self.assertIn("<dt>额外绕行</dt><dd>约1分钟</dd>", html)
         self.assertIn("小红书门店搜索", html)
         self.assertIn("在小红书搜索龙井村茶歇", html)
 
@@ -757,6 +894,42 @@ class RenderItineraryTest(unittest.TestCase):
         self.assertIn('alt="西湖实景"', html)
         self.assertIn("Wikimedia Commons · 示例作者 · CC BY 4.0", html)
 
+    def test_reviewed_visual_manifest_embeds_artwork_in_single_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cover.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"cover": {
+                "path": "cover.jpg", "alt": "山水插画", "credit": "AI 生成，非实景"
+            }}), encoding="utf-8")
+            html = render_itinerary.build(self.load_example(), render_itinerary.load_visual_manifest(manifest))
+        self.assertIn('href="data:image/jpeg;base64,/9j/2Q=="', html)
+        self.assertIn("AI 生成，非实景", html)
+
+    def test_visual_manifest_rejects_parent_directory_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "secret.jpg").write_bytes(b"private")
+            visuals = root / "visuals"
+            visuals.mkdir()
+            manifest = visuals / "manifest.json"
+            manifest.write_text(json.dumps({"cover": {
+                "path": "../secret.jpg", "alt": "山水", "credit": "测试来源"
+            }}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "视觉素材必须位于清单目录内"):
+                render_itinerary.load_visual_manifest(manifest)
+
+    def test_visual_manifest_requires_visible_credit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cover.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"cover": {
+                "path": "cover.jpg", "alt": "山水插画"
+            }}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "来源说明"):
+                render_itinerary.load_visual_manifest(manifest)
+
     def test_checkpoint_image_is_rendered_next_to_its_stop(self) -> None:
         data = self.load_example()
         data["days"][0]["events"][1]["execution"]["checkpoints"][0]["images"] = [{
@@ -797,87 +970,56 @@ class RenderItineraryTest(unittest.TestCase):
             html,
         )
 
-    def test_transport_route_embeds_no_key_amap_route_page(self) -> None:
+    def test_transport_handoff_uses_exact_poi_without_embedding_navigation(self) -> None:
         data = self.load_example()
         route = data["planning"]["transport_edges"][0]
-        route["map_route"] = {
-            "origin": "120.100000,30.200000",
-            "destination": "120.200000,30.300000",
-            "mode": "car",
+        route["destination"] = {
+            "name": "武当山游客中心地上停车场",
+            "physical_address": "湖北省十堰市丹江口市武当山游客中心",
+            "poi_id": "B000A1",
         }
+        route["map_route"]["destination_id"] = "B000A1"
         route["action_links"] = [{
-            "type": "map",
-            "label": "在高德查看完整路线",
-            "provider": "高德地图",
-            "url": "https://uri.amap.com/navigation?from=120.1,30.2,start&to=120.2,30.3,end&mode=walk",
+            "type": "map", "label": "在高德查看完整路线", "provider": "高德地图",
+            "url": "https://uri.amap.com/navigation?to=120.2,30.3,end&mode=walk",
         }]
         html = render_itinerary.build(data)
-        self.assertIn('class="route-map-frame"', html)
-        self.assertIn('data-src="https://ditu.amap.com/dir?', html)
-        self.assertIn('data-mobile-src="https://m.amap.com/navigation/carmap/', html)
-        self.assertIn("saddr=120.100000,30.200000,", html)
-        self.assertIn("daddr=120.200000,30.300000,", html)
-        self.assertIn("sort=dist", html)
-        self.assertNotIn("security-code", html)
-        self.assertIn("new IntersectionObserver", html)
-        self.assertIn(".unobserve(", html)
-        self.assertNotIn("unloadMap", html)
-        self.assertIn("navigator.userAgentData&&", html)
-        self.assertNotIn("navigator.userAgentData?.mobile", html)
-        self.assertIn('class="route-map-fullscreen"', html)
-        self.assertIn("requestFullscreen", html)
-        self.assertIn("document.fullscreenElement", html)
-        self.assertIn("allowfullscreen", html)
-        self.assertIn(".route-map-frame{height:220px}", html)
-        self.assertIn("@media(max-width:620px){.route-map-controls{width:100%;justify-content:space-between}.route-map-frame{height:180px}}", html)
-        self.assertIn("在高德查看完整路线", html)
+        self.assertIn('data-copy-destination="武当山游客中心地上停车场"', html)
+        self.assertIn('https://uri.amap.com/poidetail?poiid=B000A1', html)
+        self.assertEqual(html.count('https://uri.amap.com/poidetail?poiid=B000A1'), 1)
+        self.assertIn("在高德打开地点", html)
+        self.assertNotIn("<iframe", html)
+        self.assertNotIn("route-map-fullscreen", html)
+        self.assertNotIn("new IntersectionObserver", html)
+        self.assertNotIn("在高德查看完整路线", html)
 
-    def test_non_driving_route_keeps_general_amap_page(self) -> None:
-        data = self.load_example()
-        route = data["planning"]["transport_edges"][0]
-        route["map_route"] = {
-            "origin": "120.100000,30.200000",
-            "destination": "120.200000,30.300000",
-            "mode": "walk",
-        }
-        html = render_itinerary.amap_embed_url(route)
-        self.assertIn("https://ditu.amap.com/dir?", html)
-        self.assertIn("type=walk", html)
-        self.assertEqual(render_itinerary.amap_mobile_embed_url(route), html)
-
-    def test_daily_route_waypoints_use_indexed_amap_via_parameters(self) -> None:
-        route = {
-            "from": "酒店",
-            "to": "酒店",
-            "map_route": {
-                "origin": "103.749729,36.074842",
-                "destination": "103.749729,36.074842",
-                "mode": "car",
-                "waypoints": [
-                    {"name": "甘肃省博物馆", "coordinates": "103.774625,36.066606", "poi_id": "museum"},
-                    {"name": "黄河母亲雕塑", "coordinates": "103.798670,36.066413"},
-                ],
-            },
-        }
-        url = render_itinerary.amap_embed_url(route)
-        self.assertIn("via%5B0%5D%5Bid%5D=museum", url)
-        self.assertIn("via%5B0%5D%5Bname%5D=%E7%94%98%E8%82%83%E7%9C%81%E5%8D%9A%E7%89%A9%E9%A6%86", url)
-        self.assertIn("via%5B1%5D%5Blnglat%5D=103.798670%2C36.066413", url)
-        self.assertEqual(render_itinerary.amap_mobile_embed_url(route), url)
-
-    def test_transport_route_keeps_link_without_map_coordinates(self) -> None:
-        data = self.load_example()
-        route = data["planning"]["transport_edges"][0]
+    def test_transport_handoff_falls_back_to_existing_map_link(self) -> None:
+        route = self.load_example()["planning"]["transport_edges"][0]
         route["map_route"] = {}
         route["action_links"] = [{
-            "type": "map",
-            "label": "在高德查看完整路线",
-            "provider": "高德地图",
-            "url": "https://uri.amap.com/navigation?from=120.1,30.2,start&to=120.2,30.3,end&mode=walk",
+            "type": "map", "label": "高德路线", "provider": "高德地图",
+            "url": "https://uri.amap.com/navigation?to=120.2,30.3,end&mode=walk",
         }]
-        html = render_itinerary.render_route_map(route)[0]
-        self.assertNotIn('class="route-map-frame"', html)
-        self.assertIn("在高德查看完整路线", html)
+        html = render_itinerary.render_route_handoff(route)
+        self.assertIn('class="route-handoff"', html)
+        self.assertIn('class="route-copy"', html)
+        self.assertIn("https://uri.amap.com/navigation?to=120.2,30.3,end&amp;mode=walk", html)
+
+    def test_route_stop_arrival_mode_is_shown_when_supplied(self) -> None:
+        data = self.load_example()
+        data["planning"]["daily_routes"][0]["stops"][1]["arrival_mode"] = "步行"
+        html = render_itinerary.render_route_overview(data["days"], data["planning"]["daily_routes"])
+        self.assertIn("到达方式：步行", html)
+
+    def test_stop_sequence_does_not_require_coordinates_or_single_mode(self) -> None:
+        data = self.load_example()
+        for route in data["planning"]["daily_routes"]:
+            route.pop("mode", None)
+            for stop in route["stops"]:
+                stop.pop("coordinates", None)
+                stop.pop("coordinate_system", None)
+        html = render_itinerary.build(data)
+        self.assertIn("到达方式：公交或网约车", html)
 
     def test_confirmed_local_transport_requires_map_coordinates_and_link(self) -> None:
         data = self.load_example()

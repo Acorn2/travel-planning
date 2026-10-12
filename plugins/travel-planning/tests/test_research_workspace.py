@@ -322,7 +322,7 @@ class ResearchWorkspaceTest(unittest.TestCase):
         with self.assertRaisesRegex(research_workspace.WorkspaceError, "必须投影为候选并绑定"):
             research_workspace.validate_inventory_bindings(result, [inventory_snapshot()])
 
-    def test_restaurant_assignment_uses_v4_template_and_owned_entities(self) -> None:
+    def test_restaurant_assignment_uses_v5_template_and_owned_entities(self) -> None:
         assigned = research_workspace.assign(
             Namespace(
                 workspace=str(self.workspace),
@@ -332,9 +332,122 @@ class ResearchWorkspaceTest(unittest.TestCase):
                 depends_on=None,
             )
         )["assignment"]
-        self.assertEqual(assigned["template_version"], 4)
+        self.assertEqual(assigned["template_version"], 6)
         template = json.loads((self.workspace / assigned["result_template"]).read_text(encoding="utf-8"))
         self.assertEqual(set(template["entities"]), {"restaurants", "restaurant_snapshots", "meal_candidate_sets", "meal_options"})
+        self.assertEqual(template["community_evidence"], [])
+
+    def test_community_evidence_is_validated_and_merged_with_conflict_resolution(self) -> None:
+        submissions = (
+            (
+                "restaurant-community",
+                "restaurant-community-xhs",
+                "周末排队约30分钟",
+                "community",
+                "xiaohongshu",
+                "2026-09-24T10:00:00+08:00",
+            ),
+            (
+                "restaurant-official",
+                "restaurant-official-check",
+                "周末午餐无需排队",
+                "official",
+                "venue-official",
+                "2026-09-25T10:00:00+08:00",
+            ),
+        )
+        for task_id, source_id, insight, kind, provider, checked_at in submissions:
+            assignment = research_workspace.assign(
+                Namespace(
+                    workspace=str(self.workspace),
+                    task_id=task_id,
+                    domain="restaurant-research",
+                    instructions="合并评论洞察",
+                    depends_on=None,
+                )
+            )["assignment"]
+            result_file = self.root / f"{task_id}.json"
+            source_file = self.root / f"{task_id}-sources.json"
+            write_json(result_file, {
+                "schema_version": assignment["result_schema_version"],
+                "template_version": assignment["template_version"],
+                "template_digest": assignment["template_digest"],
+                "status": "complete",
+                "input_revision": assignment["input_revision"],
+                "summary": "社区证据",
+                "entities": {"restaurants": [{"id": "restaurant-demo", "name": "示例餐厅"}]},
+                "shared_entities": [],
+                "community_evidence": [{
+                    "target_entity_id": "restaurant-demo",
+                    "target_entity_type": "restaurant",
+                    "provider": provider,
+                    "checked_at": checked_at,
+                    "topic": "排队与拥挤",
+                    "insight": insight,
+                    "support_count": 3,
+                    "contradiction_count": 0,
+                    "community_confidence": "medium",
+                    "needs_official_recheck": True,
+                    "source_ids": [source_id],
+                }],
+                "event_bindings": [],
+                "constraints": [],
+                "unresolved": [],
+                "source_ids": [source_id],
+            })
+            write_json(source_file, [{
+                "id": source_id,
+                "title": "证据来源",
+                "url": f"https://example.com/{source_id}",
+                "kind": kind,
+                "provider": provider,
+                "authority": "official" if kind == "official" else "community",
+                "checked_at": checked_at,
+                "freshness": "dynamic",
+            }])
+            research_workspace.submit(Namespace(
+                workspace=str(self.workspace),
+                task_id=task_id,
+                result_file=str(result_file),
+                sources_file=str(source_file),
+            ))
+
+        merged = research_workspace.merge(Namespace(workspace=str(self.workspace), allow_partial=False))
+        self.assertEqual(merged["community_evidence_count"], 1)
+        self.assertEqual(merged["community_evidence_conflict_count"], 1)
+        state = json.loads((self.workspace / "state" / "research.json").read_text(encoding="utf-8"))
+        evidence = state["global_state"]["community_evidence"][0]
+        self.assertEqual(evidence["insight"], "周末午餐无需排队")
+        self.assertEqual(evidence["community_confidence"], "low")
+        self.assertEqual(
+            state["global_state"]["community_evidence_conflicts"][0]["selection_reason"],
+            "source_authority",
+        )
+
+    def test_community_evidence_requires_official_recheck_for_operational_topics(self) -> None:
+        result = {
+            "entities": {"restaurants": [{"id": "restaurant-demo"}]},
+            "shared_entities": [],
+            "community_evidence": [{
+                "target_entity_id": "restaurant-demo",
+                "target_entity_type": "restaurant",
+                "provider": "xiaohongshu",
+                "checked_at": "2026-09-25T10:00:00+08:00",
+                "topic": "价格",
+                "insight": "人均约100元",
+                "support_count": 2,
+                "contradiction_count": 0,
+                "community_confidence": "medium",
+                "needs_official_recheck": False,
+                "source_ids": ["restaurant-source"],
+            }],
+            "event_bindings": [],
+            "constraints": [],
+            "unresolved": [],
+            "source_ids": [],
+        }
+        with self.assertRaisesRegex(research_workspace.WorkspaceError, "必须标记 needs_official_recheck"):
+            research_workspace.validate_result_contract(result)
 
     def test_stay_food_cannot_submit_restaurant_shared_entity(self) -> None:
         result = {

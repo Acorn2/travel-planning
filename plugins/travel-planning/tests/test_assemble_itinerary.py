@@ -21,6 +21,21 @@ def write_json(path: Path, value: object) -> None:
 
 
 class AssembleItineraryTest(unittest.TestCase):
+    def test_assembly_rejects_nested_event_prose(self) -> None:
+        for field in ("details", "tips"):
+            self.plan["days"][0]["events"][0][field] = [{"plan": "原始对象"}]
+            write_json(self.plan_path, self.plan)
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(assemble_itinerary.AssemblyError, field):
+                    assemble_itinerary.assemble(self.workspace, self.plan_path)
+            del self.plan["days"][0]["events"][0][field]
+
+    def test_attraction_overrides_cannot_bypass_prose_validation(self) -> None:
+        self.plan["days"][0]["events"][0]["overrides"] = {"details": [{"plan": "原始对象"}]}
+        write_json(self.plan_path, self.plan)
+        with self.assertRaisesRegex(assemble_itinerary.AssemblyError, "details"):
+            assemble_itinerary.assemble(self.workspace, self.plan_path)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.workspace = Path(self.temporary.name) / "trip"
@@ -86,6 +101,25 @@ class AssembleItineraryTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_food_walk_fallback_contract_is_checked_before_assembly(self) -> None:
+        point = {"name": "测试街入口", "physical_address": "测试路1号", "coordinates": "111.28,30.69", "map_url": "https://example.com/map"}
+        walk = {"meal_type": "午餐", "entry": point, "exit": point,
+                "food_items": [{"name": "面食", "source_ids": ["food"]}, {"name": "蒸点", "source_ids": ["food"]}],
+                "budget_per_person": 60}
+        event = {"id": "street-meal", "type": "food_walk", "food_walk": walk}
+        self.plan["days"][0]["events"] = [event]
+        for fallback in ("下雨时到室内吃简餐", {"name": "室内餐饮区", "physical_address": "测试路2号", "plan": "下雨时吃简餐"}):
+            walk["fallback"] = fallback
+            write_json(self.plan_path, self.plan)
+            result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+            self.assertEqual(result["days"][0]["events"][0]["food_walk"]["fallback"], fallback)
+        for fallback in (" ", ["室内简餐"], 60, {"name": "室内餐饮区"}):
+            with self.subTest(fallback=fallback):
+                walk["fallback"] = fallback
+                write_json(self.plan_path, self.plan)
+                with self.assertRaisesRegex(assemble_itinerary.AssemblyError, "street-meal"):
+                    assemble_itinerary.assemble(self.workspace, self.plan_path)
+
     def test_assembles_selected_research_and_declarative_schedule(self) -> None:
         result = assemble_itinerary.assemble(self.workspace, self.plan_path)
         self.assertEqual(result["workflow"]["selected_route_id"], "route-1")
@@ -98,6 +132,30 @@ class AssembleItineraryTest(unittest.TestCase):
         self.assertNotIn("narration", event["execution"]["checkpoints"][0])
         self.assertNotIn("narration", event["execution"]["checkpoints"][1])
         self.assertEqual(result["planning"]["booking_tasks"][0]["event_id"], "event-museum")
+
+    def test_area_fallback_cannot_bypass_validation_through_overrides(self) -> None:
+        meal = {"id": "area-lunch", "mode": "area", "research_depth": "basic", "depth_reason": "普通午餐",
+                "decision_factors": ["routine"], "name": "商场午餐", "meal_type": "lunch",
+                "applicable_date": "2026-10-03", "time_window": "12:00–13:00", "checked_at": "2026-09-21",
+                "area_dining": {"name": "商场餐饮区", "physical_address": "测试路1号", "food_options": ["热食简餐"],
+                    "budget_per_person": 60, "why_here": "就近用餐", "availability_basis": "测试商场餐饮记录",
+                    "route_note": "步行到商场", "source_ids": ["food"],
+                    "action_links": [{"type": "map", "url": "https://example.com/map"}],
+                    "fallback": {"name": "商场内另一家餐厅", "physical_address": "测试路1号", "plan": "原店等位过久时换店"}}}
+        self.plan["collections"]["meal_options"] = {"file": "results/meals.json", "path": "meals"}
+        write_json(self.workspace / "results" / "meals.json", {"meals": [meal]})
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(result["planning"]["meal_options"][0]["area_dining"]["fallback"], meal["area_dining"]["fallback"])
+        self.plan["meal_configs"] = {"area-lunch": {"overrides": {"area_dining": {"fallback": {"plan": " "}}}}}
+        write_json(self.plan_path, self.plan)
+        with self.assertRaisesRegex(assemble_itinerary.AssemblyError, "area-lunch"):
+            assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.plan.pop("meal_configs")
+        self.plan["planning"] = {"meal_options": [{**meal, "area_dining": {**meal["area_dining"], "fallback": []}}]}
+        write_json(self.plan_path, self.plan)
+        with self.assertRaisesRegex(assemble_itinerary.AssemblyError, "area-lunch"):
+            assemble_itinerary.assemble(self.workspace, self.plan_path)
 
     def test_keeps_researched_checkpoint_narration(self) -> None:
         task = json.loads((self.workspace / "results" / "attractions.json").read_text(encoding="utf-8"))
@@ -148,6 +206,51 @@ class AssembleItineraryTest(unittest.TestCase):
             {"nested": {"replace": 3}, "items": [4]},
         )
         self.assertEqual(result, {"nested": {"keep": 1, "replace": 3}, "items": [4]})
+
+    def test_includes_merged_community_evidence_and_conflicts(self) -> None:
+        research = json.loads((self.workspace / "state" / "research.json").read_text(encoding="utf-8"))
+        research["global_state"] = {
+            "community_evidence": [{
+                "target_entity_id": "museum",
+                "target_entity_type": "attraction",
+                "provider": "xiaohongshu",
+                "checked_at": "2026-09-25T10:00:00+08:00",
+                "topic": "排队与拥挤",
+                "insight": "周末上午入口排队约20分钟",
+                "support_count": 3,
+                "contradiction_count": 0,
+                "community_confidence": "medium",
+                "needs_official_recheck": True,
+                "source_ids": ["xhs-museum"],
+            }],
+            "community_evidence_conflicts": [{
+                "target_entity_id": "museum",
+                "target_entity_type": "attraction",
+                "topic": "排队与拥挤",
+                "selected_value": {"community_confidence": "low"},
+            }],
+        }
+        write_json(self.workspace / "state" / "research.json", research)
+        self.plan["research_state_sha256"] = hashlib.sha256((self.workspace / "state" / "research.json").read_bytes()).hexdigest()
+        self.plan["planning"] = {
+            "community_evidence": [{
+                "target_entity_id": "museum",
+                "target_entity_type": "attraction",
+                "provider": "xiaohongshu",
+                "checked_at": "2026-09-25T10:00:00+08:00",
+                "topic": "入口",
+                "insight": "从南门进入更顺",
+                "support_count": 2,
+                "contradiction_count": 0,
+                "community_confidence": "medium",
+                "needs_official_recheck": False,
+                "source_ids": ["xhs-museum"],
+            }]
+        }
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(len(result["planning"]["community_evidence"]), 2)
+        self.assertEqual(len(result["planning"]["community_evidence_conflicts"]), 1)
 
 
 if __name__ == "__main__":

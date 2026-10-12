@@ -4,6 +4,16 @@
 
 ## 装配计划
 
+事件的 `details` 与 `tips` 可省略或使用空数组；提供内容时必须是非空文字组成的数组。不能放入供应商原始对象、嵌套数组、数字或布尔值，也不能用 `str()` 绕过类型检查。装配（含事件 overrides）、审查、网页渲染与随身打印共用此校验；结构化地点与应对安排应写入对应模型字段，再由渲染器生成文字。
+
+小吃街与夜市使用 `days[].events[].type=food_walk`，事件内的 `food_walk` 对象遵循 `itinerary-plan.schema.json` 的 `foodWalk` 与[餐饮研究](restaurant-research.md)的逛吃规则。它保存具体入口与出口、实际有来源的食物、人均预算估算和备选；`meal_type=午餐/晚餐` 可满足相应餐窗。食物来源引用最终 `sources[].id`，地点仍需地图核对；事件费用只通过 `cost_items[]` 纳入总预算。渲染器与审查器拒绝缺少来源、地点或预算的逛吃安排，随身打印保留执行要点。
+
+新规划的用餐备选统一写为 `{"name":"可定位的备用地点","physical_address":"具体地址","plan":"在什么条件下，改为执行什么安排"}`，三个字段均为非空文字，不混入供应商原始字段。`food_walk.fallback` 为兼容旧行程仍接受非空文字；区域用餐 `area_dining.fallback` 只接受上述对象。装配入口、审查和渲染共用字段类型校验；缺字段、空白、数组、数字或嵌套对象不能靠 `str()` 转换通过。网页与随身打印将合法对象格式化为地点、地址和应对安排，并转义 HTML。
+
+商场内坐下吃简餐属于 `type=meal` 并引用 `mode=area` 的 `meal_options[]`，不为了填满逛吃字段而编造商圈入口、出口或摊位。主方案由街区逛吃改为室内用餐时，重新检查事件类型、用餐模型、时间、费用与备选，不只修改标题；同步核对日摘要、路线叙事、全程概览和两种打印内容，避免旧方案残留。备选须说明触发条件与不同的应对动作；允许同一建筑内换餐厅，但不能重复主方案。
+
+餐窗审查兼容旧门店用餐的中文餐别与当前英文餐别：`午餐/lunch`、`晚餐/dinner` 分别满足对应餐窗，不改写原始数据。区域用餐仍按 schema 使用 `breakfast/lunch/dinner`；逛吃仍使用 `小吃/午餐/晚餐`，仅明确声明午餐或晚餐时可替代该餐，茶歇、小吃或另一餐别不能抵消缺餐。
+
 - `research_state_sha256` 必须等于当前 `state/research.json` 的 SHA-256；重新 merge 后必须重新审视计划并更新摘要。
 - `collections` 声明目标集合来自哪个任务结果或 workspace 文件、对象路径和选用 ID；通用装配器负责来源、快照、字段归一化和引用绑定。
 - `attraction_events`、`meal_configs`、`days[]`、`booking_tasks[]` 和 `planning` 保存本次旅行的语义决策。时间、采用候选和降级策略属于 JSON 数据，不属于 Python 代码。
@@ -30,6 +40,8 @@
     "meal_route_evaluations": [],
     "meal_options": [],
     "weather": [],
+    "community_evidence": [],
+    "community_evidence_conflicts": [],
     "booking_tasks": []
   },
   "days": [],
@@ -40,6 +52,8 @@
 
 `planning` 保存规范化研究和可追溯关系，`days[].events[]` 是旅行者实际执行的逐日事件流。最终页面不能要求用户回到独立研究区拼接信息。
 
+`planning.community_evidence[]` 保存小红书评论等社区来源提取出的主题洞察，`community_evidence_conflicts[]` 保存同一实体/主题下的不同说法及选择依据。社区证据只表示近期体验，不替代官方营业、开放、价格、预约、交通和安全核验；其置信度最高为 `medium`。
+
 ## 基础与工作流
 
 - 必填字段为 `trip.title`、`days[]`、`day.date`、`day.events[]`、`event.id`、`event.time`、`event.type` 和 `event.title`。`confirmed_planning` 与 `final` 阶段的事件 ID 必须唯一。
@@ -49,12 +63,14 @@
 - 日期尽量使用 ISO 格式；事件时间使用目的地当地时间。跨时区航班同时保存当地出发、到达日期和时区。
 - 事件类型只允许 `attraction`、`transport`、`meal`、`lodging`、`rest` 或 `note`。
 - `details`、`tips`、`images`、`sources` 及其他展示元数据为可选字段，不得代替结构化执行字段。
-- `planning.daily_routes[]` 每个日期最多一条，包含 `id`、`date`、`title`、`mode` 和按执行顺序排列的 `stops[]`。每站至少有 `name`、GCJ-02 `coordinates`，应通过 `event_id` 绑定当天事件；有高德 POI ID 时保留 `poi_id`。首末站分别成为高德 `from`/`to`，中间最多16站依次成为 `via[n]`。完整旅行日必须覆盖住宿出发点、所有实际景点、主选正餐及当晚住宿或结束点，不能只复制 `transport` 事件。
+- `planning.daily_routes[]` 每个日期最多一条，包含 `id`、`date`、`title` 和按执行顺序排列的 `stops[]`。每站至少有 `name`，应通过 `event_id` 绑定当天事件；已核验坐标与高德 POI ID 可分别保留为 GCJ-02 `coordinates` 和 `poi_id`。从第二站起可用 `arrival_mode` 标注实际到达方式，未知时省略；旧版整日 `mode` 字段可保留为 `mixed`，页面不据此生成统一导航路线。完整旅行日应覆盖住宿出发点、所有实际景点、主选正餐及当晚住宿或结束点，不能只复制 `transport` 事件。
 
 ## 来源、快照与动态状态
 
+新行程使用 `planning.research_contract.version=1`；餐厅使用 `restaurant_research_version=4` 和 `restaurant-source-snapshot/v2`。新来源区分获取渠道与原始信息类型，记录已读原页面和发布者；v2 餐厅快照通过 evidence[] 绑定身份、菜单、营业与体验证据，社区与评分可选。没有 POI 时以 location.verification 核对具体经营地址；路线允许有依据的区间估算。完整字段和示例见[多来源研究契约](multi-source-research.md)。v3 与 v1 快照保留旧验证，不能将其视为完成新标准。
+
 - 可能变化的事实通过一个或多个 `source_ids` 引用来源。估算值明确包含“估算”“预计”或“约”。
-- `sources[].kind` 建议使用 `official`、`transport_official`、`booking_platform`、`community` 或 `map`。社区内容只支持体验判断，不能单独证明营业、价格或交通规则。
+- `sources[].kind` 建议使用 `official`、`transport_official`、`merchant`、`editorial`、`travel_guide`、`booking_platform`、`community` 或 `map`。社区内容只支持体验判断，不能单独证明营业、价格或交通规则。
 - 重要动态字段通过 `claims[]` 保存字段级证据；`status` 使用 `verified`、`platform_reported`、`community_consensus`、`estimated` 或 `to_recheck`。
 - `to_recheck` 对象至少提供一个可执行的 HTTPS `action_links[]`。链接标签包含地点、日期、车站或其他查询条件，`disclaimer` 说明待核字段和复核时间；不得只给无关首页。
 - 飞猪、飞常准等动态交通与住宿查询写入 `planning.source_snapshots[]`，遵守 `schemas/travel-source-snapshot.schema.json`，并设置 `planning.inventory_contract_version=1`。候选通过 `inventory_refs[]` 的 `snapshot_id + offer_id + role` 关联，不得透传供应商私有响应。
@@ -97,9 +113,11 @@
 - 火车和高铁记录出发站、到达站、车次、时间、票价、余票状态、购票渠道和进站缓冲；无法实时取得的字段标记待复核，不得猜测。
 - 长途大巴记录客运站全名、承运方、班次、上下车点、行李规则和查询平台，并尽量补充官方复核来源。
 - 航班记录当地出发与到达日期和时区、机场与航站楼、含税口径、按人或全体价格、手提与托运行李、分开出票、自行提取和重新托运、退改规则。分开出票时同时核对过境与入境要求。
-- 住宿事件通过 `lodging_id` 引用 `lodging_options[]`，保存入住人数、房间数、床型、连续入住夜、实体身份与库存核验状态。
+- 住宿事件通过 `lodging_id` 引用 `lodging_options[]`。默认 kind=area，按[住宿区域规划](lodging-planning.md)与 [lodging-area.schema.json](../schemas/lodging-area.schema.json)保存范围、大概位置、入住日期和夜数、选址理由、预算预留及路线说明；location.precision=area，不含酒店报价、房型或库存。按需酒店使用 kind=hotel，保存相关房型与核验；缺 kind 的旧酒店记录保持可读。
 
 ## 餐饮与路线适配
+
+新计划 planning.research_depth_version=1，按[研究深度](research-depth.md)为交通、餐窗、天气记录 research_depth、depth_reason、decision_factors。普通餐窗使用 mode=area 与 [area-meal.schema.json](../schemas/area-meal.schema.json)，仍绑定 meal_id 和日期/时间，不引用门店候选、排名或 baseline；下面的候选与双腿路线规则只用于门店餐窗。交通另记录 selection_context、selection_basis，开放比较按 comparison_dimensions 要求排序覆盖。天气记录 basis_type、risk_summary、recheck_at，detailed 有 impact_plan；dates 或 date 限定适用日期，季节对象不能标成日期预报。
 
 - 餐饮事件通过 `meal_id` 引用 `meal_options[]`。餐厅研究遵守[餐厅候选研究与路线适配](restaurant-research.md)：`restaurants[]` 保存稳定身份，`restaurant_snapshots[]` 保存本次动态覆盖，`meal_baseline_routes[]` 保存每餐唯一基准，`meal_route_evaluations[]` 保存逐候选双腿路线和额外绕行。
 - 正常正餐的 `meal_options[]` 包含 2～3 个真实去重的 `candidate_ids[]`、`selected_candidate_id`、至少一个 `fallback_candidate_ids[]`、逐候选 `snapshot_id` 和 `route_evaluation_id`、`baseline_route_id`、前后锚点、数值型最大绕行、选择理由与切换规则。前后锚点及双腿路线的每个端点都必须提供明确名称、具体地址和坐标；页面据此展示真实“地点 A → 地点 B”，不得退化成“上一站/下一站”。

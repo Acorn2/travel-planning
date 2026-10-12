@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +16,104 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import source_adapters
+
+
+class McpStdioPipeTest(unittest.TestCase):
+    def start_server(self, script: str) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
+            [sys.executable, "-c", script], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", bufsize=1,
+        )
+        self.addCleanup(source_adapters._stop_mcp_process, process)
+        return process
+
+    def test_notification_and_response_in_same_write(self) -> None:
+        process = self.start_server(
+            'import sys,time; sys.stdout.write(\'invalid JSON\\n[]\\n'
+            '{"jsonrpc":"2.0","method":"notifications/message"}\\n'
+            '{"jsonrpc":"2.0","id":99,"result":{}}\\n'
+            '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\\n\'); '
+            'sys.stdout.flush(); time.sleep(3)'
+        )
+        self.assertEqual(source_adapters._read_response(process, 1, 1)["result"], {"ok": True})
+
+    def test_partial_line_obeys_timeout(self) -> None:
+        process = self.start_server(
+            'import sys,time; sys.stdout.write("{"); sys.stdout.flush(); time.sleep(2)'
+        )
+        started = time.monotonic()
+        with self.assertRaises(source_adapters.AdapterError) as raised:
+            source_adapters._read_response(process, 1, 0.4)
+        self.assertEqual(raised.exception.failure_kind, "timeout")
+        self.assertLess(time.monotonic() - started, 1.5)
+        source_adapters._stop_mcp_process(process)
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(process.stdout.closed)
+        self.assertFalse(process._travel_mcp_reader.thread.is_alive())
+
+    def test_queued_response_is_retained_for_next_request(self) -> None:
+        process = self.start_server(
+            'import sys,time; sys.stdout.write(\'{"id":1,"result":{}}\\n'
+            '{"id":2,"result":{"next":true}}\\n\'); sys.stdout.flush(); time.sleep(3)'
+        )
+        self.assertEqual(source_adapters._read_response(process, 1, 1)["id"], 1)
+        self.assertEqual(source_adapters._read_response(process, 2, 1)["result"], {"next": True})
+
+    def test_fragmented_utf8_and_newline(self) -> None:
+        process = self.start_server(
+            'import sys,time; payload=\'{"id":1,"result":{"name":"宜昌"}}\\n\'.encode("utf-8"); '
+            'split=payload.index("宜".encode("utf-8"))+1; '
+            'sys.stdout.buffer.write(payload[:split]); sys.stdout.flush(); time.sleep(0.05); '
+            'sys.stdout.buffer.write(payload[split:-1]); sys.stdout.flush(); time.sleep(0.05); '
+            'sys.stdout.buffer.write(payload[-1:]); sys.stdout.flush(); time.sleep(3)'
+        )
+        self.assertEqual(source_adapters._read_response(process, 1, 1)["result"], {"name": "宜昌"})
+
+    def test_notifications_do_not_extend_deadline(self) -> None:
+        process = self.start_server(
+            'import sys,time\nfor _ in range(100):\n'
+            ' sys.stdout.write(\'{"method":"notifications/message"}\\n\'); '
+            'sys.stdout.flush(); time.sleep(0.05)\n'
+        )
+        started = time.monotonic()
+        with self.assertRaises(source_adapters.AdapterError) as raised:
+            source_adapters._read_response(process, 1, 0.4)
+        self.assertEqual(raised.exception.failure_kind, "timeout")
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_response_at_eof_without_final_newline(self) -> None:
+        process = self.start_server('print(\'{"id":1,"result":{}}\', end="", flush=True)')
+        self.assertEqual(source_adapters._read_response(process, 1, 1)["id"], 1)
+
+    def test_eof_without_response_returns_promptly(self) -> None:
+        process = self.start_server('print(\'{"method":"notifications/message"}\', flush=True)')
+        started = time.monotonic()
+        with self.assertRaises(source_adapters.AdapterError) as raised:
+            source_adapters._read_response(process, 1, 3)
+        self.assertEqual(raised.exception.failure_kind, "timeout")
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_probe_and_call_with_real_stdio_server(self) -> None:
+        script = '''import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {"protocolVersion": "2024-11-05"}
+    elif request["method"] == "tools/list":
+        result = {"tools": [{"name": "test_tool"}]}
+    else:
+        result = {"structuredContent": {"name": "宜昌"}}
+    notification = {"method": "notifications/message"}
+    response = {"id": request["id"], "result": result}
+    sys.stdout.write(json.dumps(notification) + "\\n" + json.dumps(response, ensure_ascii=False) + "\\n")
+    sys.stdout.flush()
+'''
+        command = [sys.executable, "-c", script]
+        self.assertEqual(source_adapters.probe_mcp_stdio(command, dict(os.environ), 1, {"test_tool"})["status"], "ready")
+        self.assertEqual(source_adapters.call_mcp_stdio(command, "test_tool", {}, dict(os.environ), 1), {"name": "宜昌"})
 
 
 class SourceAdaptersTest(unittest.TestCase):

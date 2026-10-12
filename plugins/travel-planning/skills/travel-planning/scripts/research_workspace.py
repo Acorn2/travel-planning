@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -15,6 +16,17 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+
+EVIDENCE_SPEC = importlib.util.spec_from_file_location("research_evidence", Path(__file__).with_name("research_evidence.py"))
+assert EVIDENCE_SPEC and EVIDENCE_SPEC.loader
+research_evidence = importlib.util.module_from_spec(EVIDENCE_SPEC)
+EVIDENCE_SPEC.loader.exec_module(research_evidence)
+
+EXECUTION_SPEC = importlib.util.spec_from_file_location("execution_log", Path(__file__).with_name("execution_log.py"))
+assert EXECUTION_SPEC and EXECUTION_SPEC.loader
+execution_log = importlib.util.module_from_spec(EXECUTION_SPEC)
+EXECUTION_SPEC.loader.exec_module(execution_log)
 
 
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -84,6 +96,32 @@ SHARED_ENTITY_TYPES = {
 RESERVED_SHARED_ENTITY_FIELDS = {
     "task_id", "origin_task_ids", "last_submitted_at"
 }
+COMMUNITY_EVIDENCE_STATUSES = {"available", "partial", "unavailable", "to_recheck"}
+COMMUNITY_CONFIDENCE_LEVELS = {"low", "medium"}
+COMMUNITY_TARGET_TYPES = {
+    "attraction", "restaurant", "lodging", "place", "transport_hub",
+    "route_anchor", "transport_edge", "meal", "route", "weather", "trip",
+}
+FRESHNESS_RANKS = {"dynamic": 3, "seasonal": 2, "stable": 1}
+COMMUNITY_RECHECK_KEYWORDS = (
+    "开放", "施工", "营业", "价格", "预约", "购票", "交通", "停车", "安全",
+    "open", "construction", "hours", "price", "reservation", "ticket",
+    "transport", "parking", "safety",
+)
+SOURCE_AUTHORITY_RANKS = {
+    "official": 4,
+    "official_operator": 4,
+    "official_government": 4,
+    "official_platform": 4,
+    "transport_official": 4,
+    "official_venue": 4,
+    "map": 3,
+    "restaurant_platform": 3,
+    "booking_platform": 2,
+    "platform": 2,
+    "community": 1,
+    "xiaohongshu": 1,
+}
 
 
 class WorkspaceError(RuntimeError):
@@ -92,6 +130,18 @@ class WorkspaceError(RuntimeError):
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
 
 
 def read_json(path: Path) -> Any:
@@ -141,6 +191,117 @@ def valid_id(value: str, label: str) -> str:
     if not ID_PATTERN.fullmatch(value):
         raise WorkspaceError(f"{label} 只能使用小写字母、数字、下划线和连字符，最长 64 字符")
     return value
+
+
+def normalize_community_evidence(item: dict[str, Any], index: int) -> dict[str, Any]:
+    """Normalize the XHS comment-insight shape into the workspace contract."""
+    if not isinstance(item, dict):
+        raise WorkspaceError(f"result.community_evidence[{index}] 必须是对象")
+    normalized = dict(item)
+    if not normalized.get("insight") and normalized.get("claim"):
+        normalized["insight"] = normalized["claim"]
+    if not normalized.get("community_confidence") and normalized.get("confidence"):
+        normalized["community_confidence"] = normalized["confidence"]
+    if not normalized.get("status"):
+        normalized["status"] = "to_recheck" if normalized.get("needs_official_recheck") else "available"
+    required = {
+        "target_entity_id", "target_entity_type", "provider", "checked_at",
+        "topic", "insight", "support_count", "contradiction_count",
+        "community_confidence", "needs_official_recheck", "source_ids",
+    }
+    missing = sorted(field for field in required if normalized.get(field) in (None, ""))
+    if missing:
+        raise WorkspaceError(
+            f"result.community_evidence[{index}] 缺少字段：{', '.join(missing)}"
+        )
+    valid_id(str(normalized["target_entity_id"]), f"result.community_evidence[{index}].target_entity_id")
+    if normalized["target_entity_type"] not in COMMUNITY_TARGET_TYPES:
+        raise WorkspaceError(
+            f"result.community_evidence[{index}].target_entity_type 无效："
+            f"{normalized['target_entity_type']}"
+        )
+    if not isinstance(normalized["provider"], str) or not normalized["provider"].strip():
+        raise WorkspaceError(f"result.community_evidence[{index}].provider 必须是非空字符串")
+    if normalized["status"] not in COMMUNITY_EVIDENCE_STATUSES:
+        raise WorkspaceError(f"result.community_evidence[{index}].status 无效")
+    if normalized["community_confidence"] not in COMMUNITY_CONFIDENCE_LEVELS:
+        raise WorkspaceError(f"result.community_evidence[{index}].community_confidence 无效")
+    if not isinstance(normalized["topic"], str) or not normalized["topic"].strip():
+        raise WorkspaceError(f"result.community_evidence[{index}].topic 必须是非空字符串")
+    if not isinstance(normalized["insight"], str) or not normalized["insight"].strip():
+        raise WorkspaceError(f"result.community_evidence[{index}].insight 必须是非空字符串")
+    for field in ("support_count", "contradiction_count"):
+        value = normalized[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise WorkspaceError(
+                f"result.community_evidence[{index}].{field} 必须是非负整数"
+            )
+    if normalized["contradiction_count"] > 0:
+        normalized["community_confidence"] = "low"
+    if normalized["support_count"] <= 1:
+        normalized["community_confidence"] = "low"
+    if not isinstance(normalized["needs_official_recheck"], bool):
+        raise WorkspaceError(
+            f"result.community_evidence[{index}].needs_official_recheck 必须是布尔值"
+        )
+    if not isinstance(normalized["source_ids"], list) or not normalized["source_ids"]:
+        raise WorkspaceError(
+            f"result.community_evidence[{index}].source_ids 必须是非空数组"
+        )
+    if len(normalized["source_ids"]) != len(set(str(value) for value in normalized["source_ids"])):
+        raise WorkspaceError(f"result.community_evidence[{index}].source_ids 不能重复")
+    if parse_datetime(normalized["checked_at"]) is None:
+        raise WorkspaceError(f"result.community_evidence[{index}].checked_at 时间格式无效")
+    if normalized.get("latest_evidence_at") and parse_datetime(normalized["latest_evidence_at"]) is None:
+        raise WorkspaceError(
+            f"result.community_evidence[{index}].latest_evidence_at 时间格式无效"
+        )
+    searchable = f"{normalized['topic']} {normalized['insight']}".casefold()
+    if any(keyword.casefold() in searchable for keyword in COMMUNITY_RECHECK_KEYWORDS):
+        if not normalized["needs_official_recheck"]:
+            raise WorkspaceError(
+                f"result.community_evidence[{index}] 涉及开放、营业、价格、预约、交通或安全，"
+                "必须标记 needs_official_recheck"
+            )
+    return normalized
+
+
+def source_authority_rank(source: dict[str, Any]) -> int:
+    explicit = str(source.get("authority") or "").casefold()
+    kind = str(source.get("kind") or source.get("source_kind") or "").casefold()
+    provider = str(source.get("provider") or "").casefold()
+    for value in (explicit, kind, provider):
+        for key, rank in SOURCE_AUTHORITY_RANKS.items():
+            if key in value:
+                return rank
+    return 0
+
+
+def evidence_source_rank(evidence: dict[str, Any], sources_by_id: dict[str, dict[str, Any]]) -> int:
+    return max(
+        (source_authority_rank(sources_by_id.get(str(source_id), {})) for source_id in evidence.get("source_ids") or []),
+        default=0,
+    )
+
+
+def evidence_checked_at(
+    evidence: dict[str, Any], sources_by_id: dict[str, dict[str, Any]]
+) -> datetime | None:
+    evidence_time = parse_datetime(evidence.get("checked_at"))
+    source_times = [
+        parsed
+        for source_id in evidence.get("source_ids") or []
+        if (parsed := parse_datetime((sources_by_id.get(str(source_id)) or {}).get("checked_at")))
+    ]
+    return max([value for value in [evidence_time, *source_times] if value], default=None)
+
+
+def community_evidence_key(evidence: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(evidence["target_entity_id"]),
+        str(evidence["target_entity_type"]),
+        str(evidence["topic"]).strip().casefold(),
+    )
 
 
 def revision_digest(workspace: Path, relative_paths: list[str]) -> str:
@@ -197,6 +358,7 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
         "travelers": args.travelers,
         "origin": args.origin,
         "budget": args.budget,
+        "lodging_mode": "area",
         "preferences": args.preferences or [],
         "constraints": args.constraints or [],
         "updated_at": now(),
@@ -209,6 +371,8 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
 
     manifest = {
         "workspace_version": WORKSPACE_VERSION,
+        "research_contract_version": 1,
+        "query_design_version": 1,
         "trip_id": trip_id,
         "created_at": now(),
         "phase": "route_proposal",
@@ -229,6 +393,7 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
         "food_themes": [],
         "conflicts": [],
         "references": [],
+        "research_contract": {"version": 1, "query_design_version": 1, "capabilities": {}, "queries": [], "decisions": []},
     })
     write_json(workspace / "route-proposals.json", [])
     return {"status": "created", "workspace": str(workspace), "trip_id": trip_id}
@@ -372,6 +537,62 @@ def validate_result_contract(result: dict[str, Any]) -> None:
     for field, expected_type in required_types.items():
         if field not in result or not isinstance(result[field], expected_type):
             raise WorkspaceError(f"result.{field} 必须是 {expected_type.__name__}")
+    for lodging in (result.get("entities") or {}).get("lodging_options") or []:
+        try:
+            research_evidence.validate_lodging_area(lodging)
+        except ValueError as error:
+            raise WorkspaceError(str(error)) from error
+    for meal in (result.get("entities") or {}).get("meal_options") or []:
+        if isinstance(meal, dict) and meal.get("mode") == "area":
+            try:
+                research_evidence.validate_area_meal(meal)
+            except ValueError as error:
+                raise WorkspaceError(str(error)) from error
+    community_evidence = result.get("community_evidence") or []
+    if not isinstance(community_evidence, list):
+        raise WorkspaceError("result.community_evidence 必须是数组")
+    known_entity_ids: dict[str, str] = {}
+    for entity in result.get("shared_entities") or []:
+        if isinstance(entity, dict) and entity.get("entity_id"):
+            known_entity_ids[str(entity["entity_id"])] = str(entity.get("entity_type") or "")
+    for collection_name, collection in (result.get("entities") or {}).items():
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if item_id:
+                inferred_type = {
+                    "restaurants": "restaurant",
+                    "restaurant_snapshots": "restaurant",
+                    "attractions": "attraction",
+                    "lodging_options": "lodging",
+                    "transport_edges": "transport_edge",
+                    "intercity_options": "route",
+                    "meal_options": "meal",
+                    "weather": "weather",
+                }.get(collection_name, collection_name.rstrip("s"))
+                known_entity_ids.setdefault(str(item_id), inferred_type)
+            if collection_name == "restaurant_snapshots" and item.get("snapshot_id"):
+                known_entity_ids.setdefault(str(item["snapshot_id"]), "restaurant")
+    normalized_community_evidence = []
+    for index, evidence in enumerate(community_evidence):
+        normalized = normalize_community_evidence(evidence, index)
+        target_id = str(normalized["target_entity_id"])
+        inferred_type = known_entity_ids.get(target_id)
+        if inferred_type and normalized["target_entity_type"] not in {
+            inferred_type, target_id, "place", "trip"
+        }:
+            raise WorkspaceError(
+                f"result.community_evidence[{index}] 的目标实体类型与结果实体不一致"
+            )
+        if known_entity_ids and target_id not in known_entity_ids:
+            raise WorkspaceError(
+                f"result.community_evidence[{index}] 引用了未在本任务结果声明的目标实体：{target_id}"
+            )
+        normalized_community_evidence.append(normalized)
+    result["community_evidence"] = normalized_community_evidence
     snapshot_ids = result.get("source_snapshot_ids") or []
     if not isinstance(snapshot_ids, list):
         raise WorkspaceError("result.source_snapshot_ids 必须是数组")
@@ -639,7 +860,7 @@ def validate_stage_result(workspace: Path, assignment: dict[str, Any], result: d
                 raise WorkspaceError("restaurant_discovery 每个餐窗必须给出数值 max_detour_minutes")
             for anchor_name in ("previous_anchor", "next_anchor"):
                 anchor = meal.get(anchor_name) or {}
-                if not all(anchor.get(field) for field in ("name", "physical_address", "coordinates")):
+                if not all(anchor.get(field) for field in (("name", "physical_address") if result.get("restaurant_research_version") == 4 else ("name", "physical_address", "coordinates"))):
                     raise WorkspaceError("restaurant_discovery 每个餐窗必须提供含名称、具体地址和坐标的前后锚点")
         if entities.get("meal_options"):
             raise WorkspaceError("restaurant_discovery 不得提前输出最终 meal_options 排名")
@@ -664,6 +885,8 @@ def validate_stage_result(workspace: Path, assignment: dict[str, Any], result: d
             meal = meals.get(meal_id) or {}
             baseline = baselines.get(meal_id) or {}
             required_baseline = {"id", "from_anchor", "to_anchor", "mode", "routing_policy", "departure_at", "door_to_door_minutes", "map_url", "checked_at", "source_ids"}
+            if result.get("restaurant_research_version") == 4:
+                required_baseline.discard("map_url")
             if any(baseline.get(field) in (None, "", []) for field in required_baseline):
                 raise WorkspaceError("route-data-meals 的 baseline route 缺少锚点、口径、时间、地图或来源")
             if any(
@@ -686,11 +909,13 @@ def validate_stage_result(workspace: Path, assignment: dict[str, Any], result: d
             for leg_name, origin, destination in expected_ends:
                 leg = evaluation.get(leg_name) or {}
                 required_leg = {"route_id", "origin", "destination", "distance_meters", "duration_minutes", "door_to_door_minutes", "map_url"}
+                if result.get("restaurant_research_version") == 4:
+                    required_leg -= {"distance_meters", "duration_minutes", "map_url"}
                 if any(leg.get(field) in (None, "", []) for field in required_leg):
                     raise WorkspaceError("route-data-meals 的候选双腿路线缺少端点、耗时或地图链接")
                 route_origin = leg.get("origin") or {}
                 route_destination = leg.get("destination") or {}
-                if any(not endpoint.get(field) for endpoint in (route_origin, route_destination) for field in ("name", "physical_address", "coordinates")):
+                if any(not endpoint.get(field) for endpoint in (route_origin, route_destination) for field in (("name", "physical_address") if result.get("restaurant_research_version") == 4 else ("name", "physical_address", "coordinates"))):
                     raise WorkspaceError("route-data-meals 的候选双腿端点必须提供名称、具体地址和坐标")
                 if any(route_origin.get(field) != origin.get(field) or route_destination.get(field) != destination.get(field) for field in ("name", "physical_address", "coordinates")):
                     raise WorkspaceError("route-data-meals 的候选双腿端点没有构成上一锚点到餐厅再到下一锚点")
@@ -745,6 +970,11 @@ def normalize_sources(payload: Any, task_id: str) -> list[dict[str, Any]]:
         if not str(source["url"]).startswith("https://"):
             raise WorkspaceError(f"来源 {source_id} 必须使用 HTTPS")
         item = dict(source)
+        if item.get("acquisition"):
+            try:
+                research_evidence.validate_source(item)
+            except ValueError as error:
+                raise WorkspaceError(str(error)) from error
         item["id"] = source_id
         item["task_id"] = task_id
         item["checked_at"] = item.get("checked_at") or now()
@@ -762,6 +992,15 @@ def validate_restaurant_poi_sources(assignment: dict[str, Any], result: dict[str
     for restaurant in (result.get("entities") or {}).get("restaurants") or []:
         restaurant_id = str(restaurant.get("id") or "未命名餐厅")
         location = restaurant.get("location") or {}
+        if location.get("verification"):
+            try:
+                research_evidence.validate_location(restaurant, registry)
+                for snapshot in (result.get("entities") or {}).get("restaurant_snapshots") or []:
+                    if snapshot.get("restaurant_id") == restaurant.get("id"):
+                        research_evidence.validate_evidence(snapshot.get("evidence"), registry, {"identity", "menu", "operations", "experience"})
+            except ValueError as error:
+                raise WorkspaceError(str(error)) from error
+            continue
         poi_id = str(location.get("poi_id") or "")
         provider = str(location.get("poi_provider") or "").casefold()
         source_id = str(location.get("poi_source_id") or "")
@@ -789,6 +1028,7 @@ def source_evidence_record(source: dict[str, Any]) -> dict[str, Any]:
         "title": source.get("title") or source["url"],
         "url": source["url"],
         "source_kind": source.get("kind"),
+        **{key: source[key] for key in ("acquisition", "accessed", "publisher", "published_at", "origin_url", "independence_key") if key in source},
         "provider": source.get("provider"),
         "provider_poi_ids": source.get("provider_poi_ids") or [],
         "summary": source.get("summary") or source.get("note"),
@@ -1126,6 +1366,109 @@ def merge_shared_entities(
     return list(registry.values()), conflicts
 
 
+def merge_community_evidence(
+    results: list[dict[str, Any]],
+    sources_by_id: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Merge one current claim per entity/topic without hiding disagreements."""
+    selected: dict[tuple[str, str, str], dict[str, Any]] = {}
+    conflicts: list[dict[str, Any]] = []
+    ordered_results = sorted(
+        results,
+        key=lambda item: (str(item.get("submitted_at") or ""), str(item.get("task_id") or "")),
+    )
+    for result in ordered_results:
+        task_id = str(result["task_id"])
+        for index, raw_evidence in enumerate(result.get("community_evidence") or []):
+            evidence = normalize_community_evidence(raw_evidence, index)
+            key = community_evidence_key(evidence)
+            candidate = deepcopy(evidence)
+            candidate["origin_task_ids"] = [task_id]
+            candidate["source_authority_rank"] = evidence_source_rank(candidate, sources_by_id)
+            candidate_time = evidence_checked_at(candidate, sources_by_id)
+            candidate["selected_checked_at"] = candidate_time.isoformat(timespec="seconds") if candidate_time else None
+            previous = selected.get(key)
+            if previous is None:
+                selected[key] = candidate
+                continue
+            if previous.get("insight", "").strip().casefold() == candidate.get("insight", "").strip().casefold():
+                previous["source_ids"] = list(dict.fromkeys([
+                    *(previous.get("source_ids") or []),
+                    *(candidate.get("source_ids") or []),
+                ]))
+                previous["support_count"] = max(
+                    int(previous.get("support_count") or 0),
+                    int(candidate.get("support_count") or 0),
+                )
+                previous["contradiction_count"] = max(
+                    int(previous.get("contradiction_count") or 0),
+                    int(candidate.get("contradiction_count") or 0),
+                )
+                previous_time = evidence_checked_at(previous, sources_by_id)
+                if candidate_time and (previous_time is None or candidate_time > previous_time):
+                    previous["checked_at"] = candidate["checked_at"]
+                    previous["latest_evidence_at"] = candidate.get("latest_evidence_at")
+                previous["origin_task_ids"] = list(dict.fromkeys([
+                    *(previous.get("origin_task_ids") or []), task_id,
+                ]))
+                previous["needs_official_recheck"] = bool(
+                    previous.get("needs_official_recheck") or candidate.get("needs_official_recheck")
+                )
+                previous["community_confidence"] = (
+                    "low"
+                    if previous.get("contradiction_count", 0) > 0 or previous.get("support_count", 0) <= 1
+                    else "medium"
+                )
+                continue
+
+            previous_rank = int(previous.get("source_authority_rank") or 0)
+            previous_time = evidence_checked_at(previous, sources_by_id)
+            candidate_wins = (
+                candidate["source_authority_rank"] > previous_rank
+                or (
+                    candidate["source_authority_rank"] == previous_rank
+                    and candidate_time is not None
+                    and (previous_time is None or candidate_time > previous_time)
+                )
+            )
+            winner, loser = (candidate, previous) if candidate_wins else (previous, candidate)
+            winner["community_confidence"] = "low"
+            conflict = {
+                "target_entity_id": key[0],
+                "target_entity_type": key[1],
+                "topic": key[2],
+                "previous_value": deepcopy(previous),
+                "incoming_value": deepcopy(candidate),
+                "selected_value": deepcopy(winner),
+                "previous_task_ids": list(previous.get("origin_task_ids") or []),
+                "incoming_task_id": task_id,
+                "previous_source_ids": list(previous.get("source_ids") or []),
+                "incoming_source_ids": list(candidate.get("source_ids") or []),
+                "selected_source_ids": list(winner.get("source_ids") or []),
+                "selection_reason": (
+                    "source_authority"
+                    if winner is candidate and candidate["source_authority_rank"] != previous_rank
+                    or winner is previous and candidate["source_authority_rank"] != previous_rank
+                    else "checked_at"
+                ),
+                "selected_authority_rank": winner["source_authority_rank"],
+                "selected_checked_at": winner.get("selected_checked_at"),
+            }
+            conflicts.append(conflict)
+            winner["origin_task_ids"] = list(dict.fromkeys([
+                *(winner.get("origin_task_ids") or []),
+                *(loser.get("origin_task_ids") or []),
+            ]))
+            selected[key] = winner
+
+    output = []
+    for item in selected.values():
+        item.pop("source_authority_rank", None)
+        item.pop("selected_checked_at", None)
+        output.append(item)
+    return output, conflicts
+
+
 def merge(args: argparse.Namespace) -> dict[str, Any]:
     workspace = workspace_path(args.workspace)
     snapshot = collect_status(workspace)
@@ -1194,6 +1537,7 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
 
     merged_at = now()
     shared_entities, entity_conflicts = merge_shared_entities(results)
+    community_evidence, community_conflicts = merge_community_evidence(results, sources_by_id)
     event_bindings = [
         {"task_id": result.get("task_id"), **binding}
         for result in results
@@ -1229,6 +1573,8 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
         "global_state": {
             "shared_entities": shared_entities,
             "conflicts": entity_conflicts,
+            "community_evidence": community_evidence,
+            "community_evidence_conflicts": community_conflicts,
             "event_bindings": event_bindings,
             "constraints": constraints,
             "unresolved": unresolved,
@@ -1259,8 +1605,90 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
         "archive_count": len(archive["records"]),
         "shared_entity_count": len(shared_entities),
         "shared_entity_conflict_count": len(entity_conflicts),
+        "community_evidence_count": len(community_evidence),
+        "community_evidence_conflict_count": len(community_conflicts),
         "partial": research["partial"],
     }
+
+
+def timing(args: argparse.Namespace) -> dict[str, Any]:
+    root = execution_log.workspace_root(args.workspace)
+    if args.action == "start":
+        if not args.phase:
+            raise WorkspaceError("开始阶段计时必须提供 --phase")
+        return execution_log.begin(root, args.phase, "phase", task_id=args.task_id)
+    if args.action == "finish":
+        if not args.span_id:
+            raise WorkspaceError("结束阶段计时必须提供 --span-id")
+        return execution_log.finish(root, args.span_id, args.result_status)
+    payload = execution_log.report(root)
+    execution_log.write_json(root / "state/execution-report.json", payload)
+    return payload
+
+
+def query_reuse(args: argparse.Namespace) -> dict[str, Any]:
+    """Find exact, recent native-tool queries and their archived source references."""
+    root = execution_log.workspace_root(args.workspace)
+    parameters = read_json(Path(args.parameters_file).expanduser().resolve())
+    if not isinstance(parameters, dict) or not parameters or execution_log.unsafe_payload(parameters):
+        raise WorkspaceError("复用查找只接受非空、非敏感的公开查询参数")
+    key = execution_log.fingerprint({"provider": args.provider, "tool": args.tool, "parameters": parameters})
+    with execution_log.measured(root, args.phase or "research", "native-reuse-lookup", "query") as span:
+        span["query_key"] = key
+        if args.refresh:
+            return {"reusable": False, "reason": "用户要求重新查询"}
+        queries = []
+        sources = {}
+        paths = [root / "route-context.json", root / "state/itinerary-plan.json", root / "artifacts/itinerary.json",
+                 *sorted((root / "results").glob("*.json"))]
+        for path in paths:
+            payload = execution_log.read_json(path)
+            if not isinstance(payload, dict):
+                continue
+            contract = payload.get("research_contract") or (payload.get("planning") or {}).get("research_contract") or {}
+            queries.extend(contract.get("queries") or [])
+            queries.extend(payload.get("research_queries") or [])
+            for source in payload.get("sources") or []:
+                if isinstance(source, dict) and isinstance(source.get("id"), str):
+                    sources[source["id"]] = source
+        sources.update({source.get("id"): source for path in (root / "sources").rglob("*.jsonl") for source in read_jsonl(path)})
+        current = datetime.now().astimezone()
+        matching = [query for query in queries if isinstance(query, dict)
+                    and query.get("provider") == args.provider and query.get("tool") == args.tool
+                    and query.get("parameters") == parameters]
+        def query_order(query):
+            checked = parse_datetime(query.get("checked_at"))
+            return checked.timestamp() if checked else float("-inf")
+        if matching:
+            query = max(matching, key=query_order)
+            if query.get("status") != "success":
+                return {"reusable": False, "reason": "最新同条件查询未成功；不回退复用旧结果"}
+            if not query.get("source_ids"):
+                return {"reusable": False, "reason": "最新同条件查询尚未归档已读来源"}
+        for query in [max(matching, key=query_order)] if matching else []:
+            checked = parse_datetime(query.get("checked_at"))
+            if checked is None or not 0 <= (current - checked).total_seconds() < execution_log.REUSE_SECONDS:
+                continue
+            if not isinstance(query["source_ids"], list) or any(not isinstance(sid, str) or sid not in sources for sid in query["source_ids"]):
+                continue
+            try:
+                for sid in query["source_ids"]:
+                    source = sources[sid]
+                    research_evidence.validate_source(source)
+                    source_checked = parse_datetime(source.get("checked_at"))
+                    deadline_value = source.get("expires_at") or source.get("valid_until")
+                    deadline = parse_datetime(deadline_value)
+                    if (source_checked is None or not 0 <= (current - source_checked).total_seconds() < execution_log.REUSE_SECONDS
+                            or (deadline_value and deadline is None)
+                            or (deadline is not None and deadline <= current)):
+                        raise ValueError("已读来源已过期")
+            except ValueError:
+                continue
+            span["mode"] = "reused"
+            return {"reusable": True, "query_id": query.get("id"), "original_checked_at": query["checked_at"],
+                    "source_ids": query["source_ids"], "outcome": query.get("outcome"),
+                    "note": "复用本行程的已读来源；没有重新请求平台，不能增加独立证据或改写原查询时间"}
+        return {"reusable": False, "reason": "未找到同平台、工具、公开参数且仍有效的已读来源"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1328,15 +1756,39 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--workspace", required=True)
     command.add_argument("--allow-partial", action="store_true")
     command.set_defaults(handler=merge)
+    command = subparsers.add_parser("timing", help="记录阶段开始/结束，汇总工具耗时、复用与用户等待")
+    command.add_argument("--workspace", required=True)
+    command.add_argument("--action", choices=["start", "finish", "report"], required=True)
+    command.add_argument("--phase", type=execution_log.identifier)
+    command.add_argument("--span-id", type=execution_log.identifier)
+    command.add_argument("--task-id", type=execution_log.identifier)
+    command.add_argument("--result-status", choices=["success", "failed", "cancelled"], default="success")
+    command.set_defaults(handler=timing)
+    command = subparsers.add_parser("query-reuse", help="直接使用宿主工具前查找可复用的已读来源")
+    command.add_argument("--workspace", required=True)
+    command.add_argument("--provider", required=True)
+    command.add_argument("--tool", required=True)
+    command.add_argument("--parameters-file", required=True)
+    command.add_argument("--refresh", action="store_true")
+    command.set_defaults(handler=query_reuse)
+    for name, subparser in subparsers.choices.items():
+        if name not in {"timing", "init", "status"}:
+            subparser.add_argument("--phase", type=execution_log.identifier, help="本次命令所属阶段，用于执行计时")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        output(args.handler(args))
+        if args.command in {"init", "status", "timing"}:
+            payload = args.handler(args)
+        else:
+            phase = getattr(args, "phase", None) or {"select-route": "route_proposal", "merge": "merge"}.get(args.command, "research")
+            with execution_log.measured(args.workspace, phase, args.command, task_id=getattr(args, "task_id", None)):
+                payload = args.handler(args)
+        output(payload)
         return 0
-    except WorkspaceError as error:
+    except (WorkspaceError, execution_log.ExecutionError) as error:
         output({"status": "error", "message": str(error), "checked_at": now()})
         return 2
 
