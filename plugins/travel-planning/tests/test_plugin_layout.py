@@ -17,7 +17,6 @@ class PluginLayoutTest(unittest.TestCase):
             [
                 "skills/amap-maps/SKILL.md",
                 "skills/flyai/SKILL.md",
-                "skills/food-discovery/SKILL.md",
                 "skills/travel-planning/SKILL.md",
                 "skills/variflight/SKILL.md",
                 "skills/xiaohongshu/SKILL.md",

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1004,10 +1004,3 @@ def adapter(provider_id: str) -> SourceAdapter:
     if provider_id == "fliggy_flyai":
         return FlyAiAdapter(spec)
     return McpStdioAdapter(spec)
-
-
-def provider_manifest() -> dict[str, Any]:
-    return {
-        "schema_version": SNAPSHOT_SCHEMA_VERSION,
-        "providers": {provider_id: asdict(spec) for provider_id, spec in PROVIDERS.items()},
-    }

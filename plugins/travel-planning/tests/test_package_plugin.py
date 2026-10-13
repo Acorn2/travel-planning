@@ -75,6 +75,15 @@ class PackagePluginTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.write(str(self.plugin / "config/sources.local.env"))
         self.write("assets/readme/demo.png", "synthetic screenshot fixture")
+        runtime_files = (
+            ".mcp.json", "scripts/providers/amap_mcp.py",
+            "skills/example/assets/frontend/itinerary-app.js",
+            "skills/example/assets/frontend/itinerary-app.css",
+            "skills/example/schemas/itinerary-plan.schema.json",
+        )
+        development_files = ("tests/test_example.py", "web/src/main.js", "web/package.json", "web/package-lock.json")
+        for name in (*runtime_files, *development_files):
+            self.write(str(self.plugin / name))
         output = Path("output/test.zip")
         package_plugin.build_archive(self.plugin, output, "test-bundle")
         with zipfile.ZipFile(self.root / output) as archive:
@@ -83,6 +92,11 @@ class PackagePluginTest(unittest.TestCase):
         self.assertIn("test-bundle/assets/readme/demo.png", names)
         self.assertIn(f"test-bundle/{self.plugin}/skills/example/SKILL.md", names)
         self.assertFalse(any(name.endswith("sources.local.env") for name in names))
+        for name in runtime_files:
+            self.assertIn(f"test-bundle/{self.plugin}/{name}", names)
+        for name in development_files:
+            self.assertNotIn(f"test-bundle/{self.plugin}/{name}", names)
+            self.assertTrue((self.root / self.plugin / name).is_file())
 
 
 if __name__ == "__main__":

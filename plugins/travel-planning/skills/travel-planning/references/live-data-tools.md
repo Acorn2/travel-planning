@@ -119,7 +119,7 @@ python3 skills/travel-planning/scripts/research_sources.py osm-place \
 
 正文为空、只是标签或关键信息写在图片中时，不能只看标题和评论。`xhs-detail` 返回 `image_reading.image_count/image_indices`，并把临时图片链接留在权限受限的用户缓存；需要看图时运行 `xhs-images --note-id <id> --indices 1 2 3`，再用 `view_image` 读取返回的本地图片。图片缓存20分钟内有效，此命令不重复读取笔记详情，也不自动识别文字。具体预算与证据归档遵循 `$xiaohongshu`；原图、临时链接和本地路径不进入 workspace 或行程页面。
 
-抖音与点评实验适配器暂停，未注册 MCP；餐饮研究主动搜索公开网页，并按需补充小红书和高德。
+餐饮研究主动搜索公开网页，并按需补充小红书和高德。
 
 ## 手动查询降级
 

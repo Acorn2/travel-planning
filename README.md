@@ -82,7 +82,7 @@ codex plugin list
 
 如果 `local` marketplace 已注册，无需重复执行 `marketplace add`。拉取新版源码后重新执行 `codex plugin add travel-planning@local --json`，然后新建会话。
 
-安装 ZIP 时，先解压到持久目录。该目录下应同时存在 `.agents/plugins/marketplace.json` 和 `plugins/travel-planning/`，再进入该目录执行安装命令；CLI 接收的是目录，不是 ZIP 文件。
+安装 ZIP 时，先解压到持久目录。该目录下应同时存在 `.agents/plugins/marketplace.json` 和 `plugins/travel-planning/`，再进入该目录执行安装命令；CLI 接收的是目录，不是 ZIP 文件。安装包仅包含运行资源；修改源码或运行开发测试需克隆仓库。
 
 </details>
 
@@ -136,7 +136,7 @@ codex plugin list
 | 小红书 | 近期玩法、美食和避坑体验 | 用户本人扫码登录 |
 | OpenStreetMap / Open-Meteo | 境外地点与近期天气 | 无需 Key |
 
-住宿默认提供区域范围、选址理由、入住夜数与预算预留；具体酒店由你选择，明确需要酒店比选时才查询报价和库存。抖音、大众点评实验接入当前暂停。
+住宿默认提供区域范围、选址理由、入住夜数与预算预留；具体酒店由你选择，明确需要酒店比选时才查询报价和库存。
 
 <details>
 <summary><strong>配置高德、飞猪或飞常准凭证</strong></summary>
@@ -225,7 +225,7 @@ node --test plugins/travel-planning/web/tests/share.test.js
 make package
 ```
 
-构建资源位于 `plugins/travel-planning/skills/travel-planning/assets/frontend/`。ZIP 用于安装，不包含仓库的 Makefile 和打包工具；README 配图会随包提供。打包会过滤真实配置、私有运行数据和忽略文件，符号链接会使打包停止。
+构建资源位于 `plugins/travel-planning/skills/travel-planning/assets/frontend/`。ZIP 用于安装，不包含测试、`web/` 前端源码与构建文件、仓库的 Makefile 和打包工具；编译后的前端、数据契约、运行脚本与 README 配图会随包提供。打包会过滤真实配置、私有运行数据和忽略文件，符号链接会使打包停止。
 
 <details>
 <summary><strong>仓库结构与进一步阅读</strong></summary>
@@ -238,7 +238,7 @@ make package
 │   ├── .codex-plugin/plugin.json     # Codex 插件清单
 │   ├── .mcp.json                     # MCP Server 声明
 │   ├── config/sources.example.env    # 数据源凭证模板
-│   ├── scripts/providers/           # Provider 启动器与实验适配器
+│   ├── scripts/providers/           # Provider 启动器
 │   ├── skills/                      # 主 Skill 与数据源 Skills
 │   ├── tests/                       # Python 回归
 │   └── web/                         # Vue/Vite 源码
@@ -247,7 +247,7 @@ make package
 └── Makefile
 ```
 
-六个 Skill 中，`travel-planning` 负责跨来源编排；`xiaohongshu`、`flyai`、`amap-maps`、`variflight` 负责专用数据源；`food-discovery` 保留已暂停的实验来源说明。
+五个 Skill 中，`travel-planning` 负责跨来源编排；`xiaohongshu`、`flyai`、`amap-maps`、`variflight` 负责专用数据源。
 
 - [主 Skill](plugins/travel-planning/skills/travel-planning/SKILL.md)：完整执行流程。
 - [研究工作流](plugins/travel-planning/skills/travel-planning/references/research-workflow.md)：工作区与证据归档。

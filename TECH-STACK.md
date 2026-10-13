@@ -8,8 +8,6 @@
 
 # 当前技术与第一阶段取舍
 
-- 已暂停的实验美食来源（不注册 MCP）：标准库实现五个工具的 stdio MCP，Playwright Python 1.63.0 + 本机 Google Chrome 做专用浏览器只读页面适配。Playwright 只在用户 venv 按需安装，无全局依赖、数据库或新 HTTP 服务；不整体部署通用采集 Server。搜索字段、点评 DOM 与故障边界参考已核查的 cn-scraper-mcp、mcp-dianping、travel-agent；具体版本与真实账号验收缺口见 food-discovery 的 integrations.md。普通旅行规划仍可在该来源未安装时使用其他数据源。
-
 - 规划、审查、渲染与发布：Python 3.10+。发布脚本使用标准库处理 ZIP、SHA-256、HTTPS 和状态文件。默认 CA 缺失时可读取本机已安装的 certifi 根证书包；不自动安装、不替换显式 CA 配置、不关闭 TLS 校验。
 - 页面：沿用 Vue 3、Vite 8；发布为内联 JS/CSS 的 HTML，线上不需要应用服务器或数据库。
 - 二维码：qrcode-generator 2.0.4，MIT；在构建时内联，不把行程 URL 发给第三方服务。

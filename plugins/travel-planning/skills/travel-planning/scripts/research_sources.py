@@ -1396,12 +1396,6 @@ def capabilities(_: argparse.Namespace) -> dict[str, Any]:
             ],
             "accepted_env": ["AMAP_API_KEY", "AMAP_MAPS_API_KEY"],
             "local_config_file": str(LOCAL_CONFIG_FILE),
-            "embed_map": {
-                "available": True,
-                "credential_required": False,
-                "provider": "按设备切换的高德消费端路线页 iframe",
-                "caveat": "桌面使用通用路线页，移动端驾车使用 carmap；首次登录提示关闭后由高德保存展示状态",
-            },
             "fields": ["POI/入口", "步行", "公交/地铁", "驾车", "门到门基础耗时"],
         },
         "train": {
@@ -1438,11 +1432,6 @@ def capabilities(_: argparse.Namespace) -> dict[str, Any]:
             "start": "python3 skills/xiaohongshu/scripts/setup.py start",
             "endpoint": xhs_mcp_url(),
             "travel_default": "read_only",
-        },
-        "food_discovery": {
-            "enabled": False,
-            "status": "paused",
-            "reason": "餐饮研究仅使用小红书和高德；抖音、点评实验代码保留，不注册 MCP",
         },
         "checked_at": checked_at(),
     }

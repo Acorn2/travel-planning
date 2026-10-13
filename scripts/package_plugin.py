@@ -95,6 +95,8 @@ def package_files(plugin_dir: Path) -> list[Path]:
     for path in candidates:
         if path in ignored or not distributable_path(path):
             continue
+        if any(directory in path.parents for directory in (plugin_dir / "tests", plugin_dir / "web")):
+            continue
         source = REPOSITORY_ROOT / path
         if any((REPOSITORY_ROOT / parent).is_symlink() for parent in (path, *path.parents)):
             raise SystemExit(f"分发包不接受符号链接：{path}；请使用实际资源文件")

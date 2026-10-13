@@ -510,7 +510,7 @@ def unique_community_evidence(items: list[dict[str, Any]]) -> list[dict[str, Any
 def collect_sources(workspace: Path, allowed_ids: list[str] | None = None) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     # Source catalogs are grouped by research domain (for example
-    # sources/food-discovery.jsonl and sources/attractions/main.jsonl).
+    # sources/restaurants.jsonl and sources/attractions/main.jsonl).
     # Include nested catalogs so assembled evidence can resolve to real notes.
     for path in sorted((workspace / "sources").rglob("*.jsonl")):
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):

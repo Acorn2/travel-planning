@@ -12,4 +12,4 @@
 - 每次发布成功的用户回复必须同时给出历史列表 `/history/` 的完整 HTTPS 地址和本次行程 `/trips/<trip-id>/` 的完整 HTTPS 分享地址；只给其中一个不足以让用户找到全部规划。
 - 发布凭证使用本项目根目录 `.env`，只填 `NETLIFY_AUTH_TOKEN` 与 `NETLIFY_SITE_ID`；真实文件忽略且不得进入插件包或公网页面，分发仅带 `.env.example`。发布器根据 `.travel-research/` 状态路径定位项目，避免误读插件目录配置。Token 缺失时只提示在本机填写，不索取或打印凭证；不能把未完成的发布说成成功。
 - 测试：`python3 -m unittest discover -s plugins/travel-planning/tests`；分享辅助函数：`node --test plugins/travel-planning/web/tests/share.test.js`。浏览器验证需覆盖窄屏、三视图、无脚本降级、分享与打印；公网可访问性需实际匿名访问。
-- `scripts/package_plugin.py` 依据 Git 文件清单打包。新增 Skill 引用或资源须确认进入发布包；凭证、本地发布状态和研究数据不得进入包。
+- `scripts/package_plugin.py` 依据 Git 文件清单打包；安装包排除插件 `tests/` 与 `web/` 开发文件，保留运行脚本、Skill、数据契约及编译前端。新增 Skill 引用或资源须确认进入发布包；凭证、本地发布状态和研究数据不得进入包。

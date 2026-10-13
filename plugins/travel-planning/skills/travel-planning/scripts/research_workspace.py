@@ -102,7 +102,6 @@ COMMUNITY_TARGET_TYPES = {
     "attraction", "restaurant", "lodging", "place", "transport_hub",
     "route_anchor", "transport_edge", "meal", "route", "weather", "trip",
 }
-FRESHNESS_RANKS = {"dynamic": 3, "seasonal": 2, "stable": 1}
 COMMUNITY_RECHECK_KEYWORDS = (
     "开放", "施工", "营业", "价格", "预约", "购票", "交通", "停车", "安全",
     "open", "construction", "hours", "price", "reservation", "ticket",

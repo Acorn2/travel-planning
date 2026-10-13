@@ -82,9 +82,6 @@ class XhsImagesTest(unittest.TestCase):
             response.read.return_value = b"\x89PNG\r\n\x1a\n" + b"0" * xhs_images.MAX_BYTES
             with self.assertRaises(ValueError): xhs_images.fetch_image("https://sns.xhscdn.com/a")
 
-    def test_paused_sources_are_not_advertised_as_enabled(self):
-        self.assertFalse(research_sources.capabilities(Namespace())["food_discovery"]["enabled"])
-
 
 if __name__ == "__main__":
     unittest.main()
