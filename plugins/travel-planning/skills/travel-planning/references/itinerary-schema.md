@@ -52,6 +52,8 @@
 
 `planning` 保存规范化研究和可追溯关系，`days[].events[]` 是旅行者实际执行的逐日事件流。最终页面不能要求用户回到独立研究区拼接信息。
 
+新行程由装配器设置 `planning.xhs_comment_research_version=1`，`xhs_comment_reviews[]` 保存真实评论统计、范围、查询时间和逐洞察决策；原文摘录只留私有证据目录。采用或待核评论通过 `comment_note_id/comment_insight_ids[]` 绑定 `community_evidence`。新契约的最终行程在审查和渲染阶段都须通过[评论研究闭环](xhs-comment-research.md)，旧行程保留兼容并提示未知覆盖。
+
 `planning.community_evidence[]` 保存小红书评论等社区来源提取出的主题洞察，`community_evidence_conflicts[]` 保存同一实体/主题下的不同说法及选择依据。社区证据只表示近期体验，不替代官方营业、开放、价格、预约、交通和安全核验；其置信度最高为 `medium`。
 
 ## 基础与工作流

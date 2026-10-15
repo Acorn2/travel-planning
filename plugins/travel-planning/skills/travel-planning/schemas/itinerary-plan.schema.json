@@ -140,6 +140,28 @@
             "$ref": "community-evidence.schema.json"
           }
         },
+        "xhs_comment_research_version": {"const": 1},
+        "xhs_search_design_version": {"const": 1},
+        "xhs_detail_sampling_version": {"const": 1},
+        "xhs_search_records": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "destination", "scope", "stage", "keyword", "checked_at", "status", "candidate_note_ids"],
+            "properties": {
+              "stage": {"enum": ["discovery", "detail"]},
+              "scope": {"enum": ["eat", "play"]},
+              "status": {"enum": ["success", "no_results", "failed"]},
+              "returned_count": {"type": ["integer", "null"], "minimum": 0},
+              "selected_count": {"type": ["integer", "null"], "minimum": 0},
+              "candidate_note_ids": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        },
+        "xhs_comment_reviews": {
+          "type": "array",
+          "items": {"$ref": "xhs-comment-review.schema.json"}
+        },
         "community_evidence_conflicts": {
           "type": "array",
           "items": {

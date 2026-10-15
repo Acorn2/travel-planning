@@ -176,6 +176,8 @@ def _classify_failure(message: str) -> str:
         return "authorization_failed"
     if any(token in lower for token in ("429", "quota", "rate limit", "too many requests")):
         return "quota_exceeded"
+    if any(token in lower for token in ("context deadline exceeded", "timed out", "timeout")):
+        return "timeout"
     if any(token in lower for token in ("not found", "enoent", "command not found")):
         return "runtime_unavailable"
     return "provider_error"

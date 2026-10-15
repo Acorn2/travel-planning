@@ -6,9 +6,16 @@ agent actually browsed a page or whether a subjective recommendation is correct.
 from __future__ import annotations
 
 from datetime import date, datetime
+import importlib.util
+from pathlib import Path
 from math import isfinite
 from typing import Any
 from urllib.parse import urlparse
+
+SEARCH_SPEC = importlib.util.spec_from_file_location("xhs_search_contract", Path(__file__).with_name("xhs_search_contract.py"))
+assert SEARCH_SPEC and SEARCH_SPEC.loader
+xhs_search_contract = importlib.util.module_from_spec(SEARCH_SPEC)
+SEARCH_SPEC.loader.exec_module(xhs_search_contract)
 
 
 CHANNELS = {"web_search", "browser", "mcp", "api", "user"}
@@ -556,12 +563,13 @@ def audit_query_design(contract: dict[str, Any], sources: dict[str, dict[str, An
 
 def audit_research(data: dict[str, Any]) -> tuple[list[str], list[str]]:
     planning = data.get("planning") or {}
+    search_blocking, search_warnings = xhs_search_contract.audit_searches(data)
     contract = planning.get("research_contract")
     if contract is None:
         if planning.get("restaurant_research_version") == 4:
             return ["餐厅 v4 必须记录 research_contract 多来源研究契约"], []
-        return [], []
-    blocking, warnings = [], []
+        return search_blocking, search_warnings
+    blocking, warnings = search_blocking, search_warnings
     if not isinstance(contract, dict) or contract.get("version") != 1:
         return ["多来源研究契约 version 必须是1"], []
     for key in ("queries", "decisions"):

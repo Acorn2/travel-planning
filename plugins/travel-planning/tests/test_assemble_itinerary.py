@@ -21,6 +21,44 @@ def write_json(path: Path, value: object) -> None:
 
 
 class AssembleItineraryTest(unittest.TestCase):
+    def test_comment_captures_are_assembled_without_private_excerpts(self) -> None:
+        record = {"schema_version": "travel-xhs-comment-review/v1", "note_id": "n1",
+            "source_url": "https://www.xiaohongshu.com/explore/n1", "checked_at": "2026-10-14T10:00:00Z",
+            "collection": {"mode": "expanded"}, "analysis": {"input_count": 1, "top_level_count": 1,
+                "reply_count": 0, "eligible_count": 1, "filtered_count": 0, "group_count": 1},
+            "comment_insights": [{"insight_id": "c1", "claim": "私有评论摘录"}], "review_status": "pending"}
+        write_json(self.workspace / "evidence/main/xhs-comments/capture.json", record)
+        self.plan["planning"] = {"xhs_comment_reviews": [{"note_id": "n1", "checked_at": record["checked_at"],
+            "review_status": "reviewed", "reason": "已读评论纠错", "insight_decisions": [{"insight_id": "c1",
+                "decision": "rejected", "reason": "不是本次游览区域"}]}]}
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(result["planning"]["xhs_comment_research_version"], 1)
+        self.assertEqual(result["planning"]["xhs_comment_reviews"][0]["analysis"]["input_count"], 1)
+        self.assertEqual(result["planning"]["xhs_comment_reviews"][0]["review_status"], "reviewed")
+        self.assertNotIn("私有评论摘录", json.dumps(result, ensure_ascii=False))
+
+    def test_new_workspace_cannot_disable_comment_gate(self) -> None:
+        write_json(self.workspace / "manifest.json", {"xhs_comment_research_version": 1})
+        self.plan["planning"] = {"xhs_comment_research_version": 0}
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(result["planning"]["xhs_comment_research_version"], 1)
+
+    def test_search_observations_are_assembled_and_new_gate_cannot_be_disabled(self) -> None:
+        write_json(self.workspace / "manifest.json", {"xhs_search_design_version": 1})
+        record = {"schema_version": "travel-xhs-search/v1", "id": "xhs-test", "checked_at": "2026-10-14T10:00:00Z",
+            "keyword": "宜昌美食推荐", "destination": "宜昌", "scope": "eat", "stage": "discovery", "status": "success",
+            "returned_count": 3, "selected_count": 2, "candidate_note_ids": ["n1", "n2", "n3"]}
+        write_json(self.workspace / "evidence/main/xhs-searches/one.json", record)
+        write_json(self.workspace / "evidence/attractions/xhs-searches/same.json", record)
+        self.plan["planning"] = {"xhs_search_design_version": 0}
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(result["planning"]["xhs_search_design_version"], 1)
+        self.assertEqual(len(result["planning"]["xhs_search_records"]), 1)
+        self.assertEqual(result["planning"]["xhs_search_records"][0]["returned_count"], 3)
+
     def test_assembly_rejects_nested_event_prose(self) -> None:
         for field in ("details", "tips"):
             self.plan["days"][0]["events"][0][field] = [{"plan": "原始对象"}]

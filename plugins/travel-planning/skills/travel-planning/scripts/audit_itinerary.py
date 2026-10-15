@@ -18,6 +18,11 @@ assert SPEC and SPEC.loader
 render_itinerary = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(render_itinerary)
 
+COMMENT_SPEC = importlib.util.spec_from_file_location("xhs_comment_contract", Path(__file__).with_name("xhs_comment_contract.py"))
+assert COMMENT_SPEC and COMMENT_SPEC.loader
+xhs_comment_contract = importlib.util.module_from_spec(COMMENT_SPEC)
+COMMENT_SPEC.loader.exec_module(xhs_comment_contract)
+
 REPORT_PHRASES = ("综合考虑", "总体而言", "值得一去", "丰富体验", "感受当地", "合理安排", "行程亮点")
 TRANSPORT_COVERAGE_SORTS = {2, 3, 4, 6, 7}
 STRONG_AVAILABILITY_CLAIMS = {"available", "confirmed", "verified", "booked", "有房", "可订", "已确认"}
@@ -290,6 +295,10 @@ def audit(data: dict[str, Any]) -> dict[str, Any]:
     )
     blocking.extend(community_blocking)
     warnings.extend(community_warnings)
+    comment_blocking, comment_warnings, comment_stats = xhs_comment_contract.audit_reviews(data)
+    blocking.extend(comment_blocking)
+    warnings.extend(comment_warnings)
+    community_stats["comment_research"] = comment_stats
     meals = {item.get("id"): item for item in planning.get("meal_options") or []}
     source_snapshots = {
         str(item.get("snapshot_id")): item

@@ -22,6 +22,11 @@ assert EXECUTION_SPEC and EXECUTION_SPEC.loader
 execution_log = importlib.util.module_from_spec(EXECUTION_SPEC)
 EXECUTION_SPEC.loader.exec_module(execution_log)
 
+COMMENT_SPEC = importlib.util.spec_from_file_location("xhs_comment_contract", Path(__file__).with_name("xhs_comment_contract.py"))
+assert COMMENT_SPEC and COMMENT_SPEC.loader
+xhs_comment_contract = importlib.util.module_from_spec(COMMENT_SPEC)
+COMMENT_SPEC.loader.exec_module(xhs_comment_contract)
+
 
 ALLOWED_ACTION_TYPES = {
     "map", "official", "official_homepage", "official_notice", "official_booking", "official_wechat",
@@ -659,6 +664,7 @@ def validate_plan(workspace: Path, plan: dict[str, Any]) -> None:
 
 def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
     workspace = workspace.resolve()
+    manifest_path = workspace / "manifest.json"
     plan = read_json(plan_path)
     validate_plan(workspace, plan)
     defaults = default_settings(plan)
@@ -725,6 +731,22 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
         *(planning.get("community_evidence_conflicts") or []),
         *(explicit_community_conflicts or []),
     ]
+    try:
+        planning["xhs_comment_reviews"] = xhs_comment_contract.load_reviews(
+            workspace, planning.get("xhs_comment_reviews") or []
+        )
+    except ValueError as error:
+        raise AssemblyError(str(error)) from error
+    if (manifest_path.exists() and read_json(manifest_path).get("xhs_comment_research_version") == 1) or planning["xhs_comment_reviews"]:
+        planning["xhs_comment_research_version"] = 1
+    try:
+        planning["xhs_search_records"] = research_evidence.xhs_search_contract.records(workspace)
+    except ValueError as error:
+        raise AssemblyError(str(error)) from error
+    if (manifest_path.exists() and read_json(manifest_path).get("xhs_search_design_version") == 1) or planning["xhs_search_records"]:
+        planning["xhs_search_design_version"] = 1
+    if manifest_path.exists() and read_json(manifest_path).get("xhs_detail_sampling_version") == 1:
+        planning["xhs_detail_sampling_version"] = 1
     for meal in planning.get("meal_options") or []:
         if meal.get("mode") == "area":
             try:

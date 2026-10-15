@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Xiaohongshu semantic review with observed metadata imported by assembly",
+  "type": "object",
+  "required": ["note_id", "checked_at", "review_status"],
+  "properties": {
+    "note_id": {"type": "string", "minLength": 1},
+    "source_url": {"type": "string", "format": "uri"},
+    "checked_at": {"type": "string", "format": "date-time"},
+    "review_status": {"enum": ["pending", "reviewed", "unavailable"]},
+    "reason": {"type": "string", "minLength": 1},
+    "collection": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["expanded", "sampled"]},
+        "reported_total": {"type": ["string", "integer", "null"]},
+        "has_more": {"type": ["boolean", "null"]},
+        "unexpanded_reply_threads": {"type": "integer", "minimum": 0}
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "required": ["input_count", "top_level_count", "reply_count", "eligible_count", "filtered_count", "group_count"],
+      "properties": {
+        "input_count": {"type": "integer", "minimum": 0},
+        "top_level_count": {"type": "integer", "minimum": 0},
+        "reply_count": {"type": "integer", "minimum": 0},
+        "eligible_count": {"type": "integer", "minimum": 0},
+        "filtered_count": {"type": "integer", "minimum": 0},
+        "duplicate_count": {"type": "integer", "minimum": 0},
+        "group_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "insight_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "insight_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["insight_id", "decision", "reason"],
+        "properties": {
+          "insight_id": {"type": "string", "minLength": 1},
+          "decision": {"enum": ["adopted", "rejected", "needs_recheck"]},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"review_status": {"const": "pending"}}},
+     "then": {"required": ["source_url", "collection", "analysis", "insight_ids"]}},
+    {"if": {"properties": {"review_status": {"const": "reviewed"}}},
+     "then": {"required": ["reason", "insight_decisions"]}},
+    {"if": {"properties": {"review_status": {"const": "unavailable"}}},
+     "then": {"required": ["source_url", "reason"], "not": {"required": ["analysis"]}}}
+  ]
+}

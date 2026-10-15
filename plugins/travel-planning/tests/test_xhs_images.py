@@ -17,7 +17,8 @@ class XhsImagesTest(unittest.TestCase):
             cache = Path(directory) / "tokens.json"
             cache.write_text(json.dumps({"notes": {"n": {"xsec_token": "private"}}}))
             detail = {"data": {"note": {"noteId": "n", "desc": "", "imageList": [
-                {"urlDefault": "https://sns-webpic.xhscdn.com/a?secret=private"}]}}}
+                {"urlDefault": "https://sns-webpic.xhscdn.com/a?secret=private"}]},
+                "comments": {"list": [], "hasMore": False}}}
             with patch.object(research_sources, "xhs_mcp_token_cache_path", return_value=cache), \
                  patch.object(research_sources, "require_xhs_login"), \
                  patch.object(research_sources, "read_xhs_mcp_token_cache", return_value=json.loads(cache.read_text())), \

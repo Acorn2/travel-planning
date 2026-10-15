@@ -27,6 +27,11 @@ assert EXECUTION_SPEC and EXECUTION_SPEC.loader
 execution_log = importlib.util.module_from_spec(EXECUTION_SPEC)
 EXECUTION_SPEC.loader.exec_module(execution_log)
 
+COMMENT_SPEC = importlib.util.spec_from_file_location("xhs_comment_contract", Path(__file__).with_name("xhs_comment_contract.py"))
+assert COMMENT_SPEC and COMMENT_SPEC.loader
+xhs_comment_contract = importlib.util.module_from_spec(COMMENT_SPEC)
+COMMENT_SPEC.loader.exec_module(xhs_comment_contract)
+
 
 TYPES = {
     "attraction": ("景点", "◇"), "transport": ("交通", "↗"),
@@ -1332,6 +1337,9 @@ def validate_data(data: dict[str, Any]) -> None:
     evidence_blocking, _ = research_evidence.audit_research(data)
     if evidence_blocking:
         raise ValueError("；".join(evidence_blocking))
+    comment_blocking, _, _ = xhs_comment_contract.audit_reviews(data)
+    if comment_blocking:
+        raise ValueError("；".join(comment_blocking))
     if workflow.get("phase") == "final" and not workflow.get("selected_route_id"):
         raise ValueError("最终行程必须包含已确认的 selected_route_id")
     if workflow.get("phase") == "final" and not planning.get("readiness"):

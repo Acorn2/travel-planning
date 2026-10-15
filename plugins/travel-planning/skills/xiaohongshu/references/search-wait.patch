@@ -1,0 +1,44 @@
+--- a/xiaohongshu/search.go
++++ b/xiaohongshu/search.go
+@@ -88,7 +88,7 @@
+ }
+ 
+ func NewSearchAction(page *rod.Page) *SearchAction {
+-	pp := page.Timeout(60 * time.Second)
++	pp := page.Timeout(90 * time.Second)
+ 
+ 	return &SearchAction{page: pp}
+ }
+@@ -100,14 +100,15 @@
+ 		return nil, err
+ 	}
+ 
+-	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
+-	// 否则搜索页不 stable 时 MustWaitStable/MustWait 会永久挂起（无 deadline 可依赖）。
+-	page := s.page.Context(ctx).Timeout(60 * time.Second)
+-
+-	searchURL := makeSearchURL(keyword)
+-	page.MustNavigate(searchURL)
+-	page.MustWaitStable()
+-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
++	// Travel Planning repair: bound stages and wait for the query's rendered data.
++	page := s.page.Context(ctx).Timeout(90 * time.Second)
++	defer page.CancelTimeout()
++	if err := navigateSearch(page, makeSearchURL(keyword)); err != nil {
++		return nil, err
++	}
++	if err := waitSearchReady(page, keyword, 20*time.Second); err != nil {
++		return nil, err
++	}
+ 	humanize.Delay(ctx, humanize.AfterNavigate)
+ 
+ 	if len(pending) > 0 {
+@@ -145,7 +146,7 @@
+ 		    window.__INITIAL_STATE__.search &&
+ 		    window.__INITIAL_STATE__.search.feeds) {
+ 			const feeds = window.__INITIAL_STATE__.search.feeds;
+-			const feedsData = feeds.value !== undefined ? feeds.value : feeds._value;
++			const feedsData = Array.isArray(feeds) ? feeds : (feeds.value !== undefined ? feeds.value : feeds._value);
+ 			if (feedsData) {
+ 				return JSON.stringify(feedsData);
+ 			}

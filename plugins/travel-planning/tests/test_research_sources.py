@@ -252,7 +252,7 @@ class ResearchSourcesTest(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["provider"], "xpzouying/xiaohongshu-mcp")
         probe.assert_called_once_with(
-            "http://127.0.0.1:18060/mcp",
+            "http://127.0.0.1:18061/mcp",
             15,
             {"check_login_status", "search_feeds", "get_feed_detail"},
             None,
@@ -279,7 +279,7 @@ class ResearchSourcesTest(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["kind"], "mcp_streamable_http")
         probe.assert_called_once_with(
-            "http://127.0.0.1:18060/mcp",
+            "http://127.0.0.1:18061/mcp",
             7,
             {"check_login_status", "search_feeds", "get_feed_detail"},
             None,
@@ -382,7 +382,7 @@ class ResearchSourcesTest(unittest.TestCase):
                     "xhs_mcp_call",
                     side_effect=[{"text": "✅ 已登录\n用户名: test"}, response],
                 ) as call:
-                    result = research_sources.xhs_detail(Namespace(note_id="note-1"))
+                    result = research_sources.xhs_detail(Namespace(note_id="note-1", all_comments=False))
             self.assertEqual(call.call_args_list[0].args[0], "check_login_status")
             self.assertEqual(call.call_args_list[1].args[0], "get_feed_detail")
             self.assertEqual(call.call_args_list[1].args[1]["xsec_token"], "cached-token")

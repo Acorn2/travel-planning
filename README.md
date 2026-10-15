@@ -8,7 +8,7 @@ A Codex plugin for travel research, itinerary planning, and watercolor travel jo
 
 [![Codex Plugin](https://img.shields.io/badge/Codex-Plugin-10a37f)](plugins/travel-planning/skills/travel-planning/SKILL.md) [![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)](#运行要求) [![MCP](https://img.shields.io/badge/MCP-Integrated-236c48)](#数据源配置) [![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue)](LICENSE)
 
-[**查看在线 Demo →**](https://merry-sunshine-eaa71d.netlify.app/trips/yichang-2026-10-15/) · [快速安装](#快速安装) · [开始使用](#开始使用)
+[**查看在线 Demo →**](https://merry-sunshine-eaa71d.netlify.app/trips/yichang-2026-10-15/) · [快速安装](#快速安装) · [开始使用](#开始使用) · [作者其他作品](https://hreshhao.com/products/)
 
 <img src="assets/readme/demo-desktop.png" width="100%" alt="宜昌 Demo 桌面首页：水彩封面、出行信息和四个行程视图">
 
@@ -58,7 +58,7 @@ flowchart LR
 | Python | 3.10 或更高版本 |
 | Node.js | 22.14.0 或更高版本，`npm`、`npx` 可用 |
 | 宿主能力 | 网页搜索与原页面阅读；水彩图片需要可用的生图与看图能力 |
-| 小红书（可选） | 固定版本预编译工具支持 macOS Apple Silicon、Linux x86_64 |
+| 小红书（可选） | 支持 macOS Apple Silicon、Linux x86_64；首次安装需联网、`curl` 和 `patch`，自动使用隔离 Go 工具链构建固定源码与搜索补丁 |
 
 当前已验证的安装路径是 **Codex 本地 marketplace**。仓库保留 Claude Code 和通用宿主清单，尚未验收它们的一键安装流程。
 
@@ -176,7 +176,7 @@ python3 plugins/travel-planning/skills/xiaohongshu/scripts/setup.py start
 python3 plugins/travel-planning/skills/xiaohongshu/scripts/setup.py status
 ```
 
-扫码与账号确认由你本人完成。二进制、Cookie 和运行状态保存在 `~/.local/share/travel-planning/xiaohongshu-mcp/`。
+扫码与账号确认由你本人完成。二进制、Cookie 和运行状态保存在 `~/.local/share/travel-planning/xiaohongshu-mcp/`。旅行服务使用 `127.0.0.1:18061`，与其他项目的原版默认端口隔离；安装器校验源码和工具链 SHA256，应用 `search-ready-v1` 补丁后本地构建，不安装全局 Go。
 
 后续用 `setup.py start / stop / logs` 管理服务。若 `stop` 提示旧 PID 或进程身份不匹配，先通过系统进程工具核对旧服务，确认停止后再启动，不直接按旧 PID 强制结束进程。
 
@@ -270,4 +270,20 @@ README 的展示顺序参考 [video-shotcraft](https://github.com/Vincentwei1021
 
 ---
 
-由 [Hresh赫什](https://hreshhao.com/) 持续构建。
+## 作者与更多作品
+
+Travel Planning 由 [Hresh赫什](https://hreshhao.com/) 持续构建。我是一名用 AI 把想法做成产品的独立开发者，从需求、设计到上线实践产品，也记录 AI 开发、效率工具与产品冷启动的过程。
+
+除了旅行规划，我还做了一些解决日常问题、探索个人兴趣的产品：
+
+| 产品 | 用来做什么 |
+| --- | --- |
+| [收链 / LinkBox](https://hreshhao.com/products/linkbox/) | iOS 链接收纳工具，先保存、后整理，支持标签、搜索与去重，数据默认保存在本机。 |
+| [TabNest](https://hreshhao.com/products/tabnest/) | Chrome 新标签页工作台，管理标签、整理书签、保存和恢复工作会话。 |
+| [ReadCover / 阅读掩护](https://hreshhao.com/products/readcover/) | 支持 TXT / EPUB 的本地阅读工具，提供 Word 风格界面、失焦保护与老板键。 |
+| [通辽宇宙知识库](https://hreshhao.com/products/tongliao-universe/) | 串联小约翰可汗视频中的人物、国家、历史、梗与配乐，方便回查出处和关联线索。 |
+| [儿童 3D 自然博物馆](https://hreshhao.com/products/nature-museum/) | 面向儿童与陪伴者的自然观察网站，通过 3D 模型、旁白和故事一起认识自然。 |
+
+**[查看完整产品作品集 →](https://hreshhao.com/products/)** · [访问个人网站](https://hreshhao.com/)
+
+更多 iOS App、网页工具、浏览器扩展和微信小程序的介绍与当前状态，都集中放在作品集中。

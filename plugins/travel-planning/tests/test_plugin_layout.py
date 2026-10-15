@@ -60,7 +60,7 @@ class PluginLayoutTest(unittest.TestCase):
         )
         self.assertEqual(
             servers["xiaohongshu-mcp"],
-            {"type": "http", "url": "http://127.0.0.1:18060/mcp"},
+            {"type": "http", "url": "http://127.0.0.1:18061/mcp"},
         )
 
     def test_xiaohongshu_uses_pinned_http_mcp_without_extension_vendor(self) -> None:

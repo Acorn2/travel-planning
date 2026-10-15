@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import hashlib
 import json
 import os
@@ -22,10 +23,12 @@ UPSTREAM_REPOSITORY = "https://github.com/xpzouying/xiaohongshu-mcp"
 UPSTREAM_VERSION = "v2.5.0"
 UPSTREAM_COMMIT = "6583124dfda92312b6bc19a042a6acfae63fe498"
 RELEASE_BASE_URL = f"{UPSTREAM_REPOSITORY}/releases/download/{UPSTREAM_VERSION}"
-DEFAULT_ENDPOINT = "http://127.0.0.1:18060"
+RUNTIME_VERSION = "v2.5.0-search-ready-v1"
+DEFAULT_ENDPOINT = "http://127.0.0.1:18061"
 DEFAULT_DATA_ROOT = Path.home() / ".local" / "share" / "travel-planning" / "xiaohongshu-mcp"
 DATA_ROOT = Path(os.environ.get("TRAVEL_XHS_MCP_HOME", DEFAULT_DATA_ROOT)).expanduser().resolve()
-RELEASE_DIR = DATA_ROOT / "releases" / UPSTREAM_VERSION
+RELEASE_DIR = DATA_ROOT / "releases" / RUNTIME_VERSION
+LOGIN_RELEASE_DIR = DATA_ROOT / "releases" / UPSTREAM_VERSION
 STATE_DIR = DATA_ROOT / "state"
 COOKIE_FILE = STATE_DIR / "cookies.json"
 PID_FILE = STATE_DIR / "service.pid"
@@ -53,6 +56,12 @@ ASSETS = {
         ),
     },
 }
+
+
+_BUILD_SPEC = importlib.util.spec_from_file_location("xhs_build_runtime", Path(__file__).with_name("build_runtime.py"))
+assert _BUILD_SPEC and _BUILD_SPEC.loader
+build_runtime = importlib.util.module_from_spec(_BUILD_SPEC)
+_BUILD_SPEC.loader.exec_module(build_runtime)
 
 
 class SetupError(RuntimeError):
@@ -107,13 +116,13 @@ def _download(name: str, digest: str, destination: Path) -> None:
 
 def _binary(kind: str) -> Path:
     name, _ = _asset_spec()[kind]
-    return RELEASE_DIR / name
+    return (RELEASE_DIR if kind == "server" else LOGIN_RELEASE_DIR) / name
 
 
 def _verify_binary(kind: str) -> bool:
     name, digest = _asset_spec()[kind]
-    path = RELEASE_DIR / name
-    return path.is_file() and _sha256(path) == digest
+    path = _binary(kind)
+    return build_runtime.verified_build(path) if kind == "server" else (path.is_file() and _sha256(path) == digest)
 
 
 def _health(endpoint: str = DEFAULT_ENDPOINT, timeout: float = 2.0) -> bool:
@@ -166,7 +175,7 @@ def _managed_identity(pid: int | None) -> dict[str, Any] | None:
         record = json.loads(PID_FILE.with_suffix(".json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    expected = f"{_binary('server')} -headless=true -port=127.0.0.1:18060"
+    expected = f"{_binary('server')} -headless=true -port=127.0.0.1:18061"
     if not isinstance(record, dict) or record.get("pid") != pid or record.get("command") != expected:
         return None
     current = _process_identity(pid)
@@ -193,17 +202,23 @@ def _secure_state_files() -> None:
 
 
 def install(_: argparse.Namespace) -> dict[str, Any]:
+    _asset_spec()  # Fail before any download on unsupported platforms.
     installed: list[str] = []
-    for kind, (name, digest) in _asset_spec().items():
-        destination = RELEASE_DIR / name
-        if not (destination.is_file() and _sha256(destination) == digest):
-            _download(name, digest, destination)
-            installed.append(kind)
+    if not _verify_binary("server"):
+        if _process_alive(_read_pid()):
+            raise SetupError("运行记录中的服务仍在运行；先核对并停止，再安装修复版，避免磁盘版本与运行版本不一致")
+        build_runtime.build(_binary("server"), DATA_ROOT)
+        installed.append("server")
+    name, digest = _asset_spec()["login"]
+    if not _verify_binary("login"):
+        _download(name, digest, _binary("login"))
+        installed.append("login")
     _secure_state_files()
     return {
         "status": "installed",
         "provider": "xpzouying/xiaohongshu-mcp",
         "version": UPSTREAM_VERSION,
+        "runtime_version": RUNTIME_VERSION,
         "commit": UPSTREAM_COMMIT,
         "verified_assets": sorted(_asset_spec()),
         "downloaded": sorted(installed),
@@ -218,16 +233,18 @@ def status(_: argparse.Namespace) -> dict[str, Any]:
     server_verified = _verify_binary("server")
     login_verified = _verify_binary("login")
     healthy = _health()
+    managed = _process_alive(pid) and _managed_identity(pid) is not None
     return {
-        "status": "ready" if healthy else ("installed" if server_verified and login_verified else "not_installed"),
+        "status": "ready" if healthy and managed and server_verified else ("installed" if server_verified and login_verified else "not_installed"),
         "provider": "xpzouying/xiaohongshu-mcp",
         "version": UPSTREAM_VERSION,
+        "runtime_version": RUNTIME_VERSION,
         "commit": UPSTREAM_COMMIT,
         "assets_verified": {"server": server_verified, "login": login_verified},
         "service": {
             "healthy": healthy,
             "managed_pid": pid,
-            "managed_process_alive": _process_alive(pid) and _managed_identity(pid) is not None,
+            "managed_process_alive": managed,
             "endpoint": f"{DEFAULT_ENDPOINT}/mcp",
         },
         "cookie_file_present": COOKIE_FILE.is_file(),
@@ -239,6 +256,8 @@ def start(args: argparse.Namespace) -> dict[str, Any]:
     if not _verify_binary("server"):
         raise SetupError("尚未安装或发布包校验失败；先运行 setup.py install")
     if _health():
+        if _managed_identity(_read_pid()) is None:
+            raise SetupError("18061 端口已被非本项目受管服务占用；不会把其他实例报告为修复版")
         return status(args)
     if _process_alive(_read_pid()):
         raise SetupError("PID 记录中的进程仍在运行；先核对 status 和 logs，不会覆盖进程记录或重复启动")
@@ -247,7 +266,7 @@ def start(args: argparse.Namespace) -> dict[str, Any]:
     environment["COOKIES_PATH"] = str(COOKIE_FILE)
     with LOG_FILE.open("ab") as log:
         process = subprocess.Popen(
-            [str(_binary("server")), "-headless=true", "-port=127.0.0.1:18060"],
+            [str(_binary("server")), "-headless=true", "-port=127.0.0.1:18061"],
             cwd=STATE_DIR,
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -256,7 +275,7 @@ def start(args: argparse.Namespace) -> dict[str, Any]:
             start_new_session=True,
         )
     identity = _process_identity(process.pid)
-    expected = f"{_binary('server')} -headless=true -port=127.0.0.1:18060"
+    expected = f"{_binary('server')} -headless=true -port=127.0.0.1:18061"
     if identity is None or identity["command"] != expected:
         if process.poll() is None:
             process.terminate()
@@ -339,7 +358,7 @@ def logs(args: argparse.Namespace) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("install", help="下载并校验固定版本的服务与登录工具").set_defaults(handler=install)
+    subparsers.add_parser("install", help="校验固定源码与隔离 Go 工具链，构建搜索修复版并安装登录工具").set_defaults(handler=install)
     subparsers.add_parser("status", help="检查安装、进程和 HTTP 健康状态").set_defaults(handler=status)
     start_parser = subparsers.add_parser("start", help="在后台启动本地 MCP 服务")
     start_parser.add_argument("--timeout", type=int, default=300, choices=range(5, 601), metavar="5-600")
@@ -357,7 +376,7 @@ def main() -> int:
     try:
         output(args.handler(args))
         return 0
-    except SetupError as error:
+    except (SetupError, RuntimeError, OSError, subprocess.CalledProcessError) as error:
         output({"status": "error", "message": str(error)})
         return 2
 

@@ -31,7 +31,7 @@ class SetupXhsMcpTest(unittest.TestCase):
                     kill.assert_not_called()
 
     def test_stop_refuses_live_pid_without_matching_identity(self) -> None:
-        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18060"}
+        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18061"}
         for record in (None, {**identity, "started_at": "Mon Oct 12 09:00:00 2026"}, {**identity, "command": "/test/other"}):
             with tempfile.TemporaryDirectory() as directory:
                 pid_file = Path(directory) / "service.pid"
@@ -52,7 +52,7 @@ class SetupXhsMcpTest(unittest.TestCase):
                     self.assertTrue(pid_file.exists())
 
     def test_stop_signals_only_matching_process_and_clears_records(self) -> None:
-        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18060"}
+        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18061"}
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / "service.pid"
             pid_file.write_text("12345", encoding="utf-8")
@@ -71,7 +71,7 @@ class SetupXhsMcpTest(unittest.TestCase):
             self.assertFalse(record_file.exists())
 
     def test_identity_change_before_signal_is_not_stopped(self) -> None:
-        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18060"}
+        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18061"}
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / "service.pid"
             pid_file.write_text("12345", encoding="utf-8")
@@ -88,7 +88,7 @@ class SetupXhsMcpTest(unittest.TestCase):
                 kill.assert_not_called()
 
     def test_start_records_identity_with_private_permissions(self) -> None:
-        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18060"}
+        identity = {"pid": 12345, "started_at": "Mon Oct 12 10:00:00 2026", "command": "/test/server -headless=true -port=127.0.0.1:18061"}
         process = MagicMock(pid=12345)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -158,6 +158,35 @@ class SetupXhsMcpTest(unittest.TestCase):
                     setup_xhs_mcp._download("binary", "0" * 64, destination)
             self.assertFalse(destination.exists())
             self.assertFalse(destination.with_suffix(".download").exists())
+
+    def test_start_refuses_healthy_unmanaged_runtime(self) -> None:
+        with (patch.object(setup_xhs_mcp, "_verify_binary", return_value=True),
+              patch.object(setup_xhs_mcp, "_health", return_value=True),
+              patch.object(setup_xhs_mcp, "_read_pid", return_value=None),
+              patch.object(setup_xhs_mcp, "_managed_identity", return_value=None),
+              patch.object(setup_xhs_mcp.subprocess, "Popen") as popen):
+            with self.assertRaisesRegex(setup_xhs_mcp.SetupError, "非本项目"):
+                setup_xhs_mcp.start(Namespace(timeout=5))
+            popen.assert_not_called()
+
+    def test_install_refuses_to_replace_live_runtime(self) -> None:
+        with (patch.object(setup_xhs_mcp, "_verify_binary", return_value=False),
+              patch.object(setup_xhs_mcp, "_read_pid", return_value=12345),
+              patch.object(setup_xhs_mcp, "_process_alive", return_value=True),
+              patch.object(setup_xhs_mcp.build_runtime, "build") as build):
+            with self.assertRaisesRegex(setup_xhs_mcp.SetupError, "仍在运行"):
+                setup_xhs_mcp.install(Namespace())
+            build.assert_not_called()
+
+    def test_unmanaged_healthy_service_is_not_reported_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (patch.object(setup_xhs_mcp, "STATE_DIR", root),
+                  patch.object(setup_xhs_mcp, "_read_pid", return_value=None),
+                  patch.object(setup_xhs_mcp, "_verify_binary", return_value=True),
+                  patch.object(setup_xhs_mcp, "_health", return_value=True),
+                  patch.object(setup_xhs_mcp, "_process_alive", return_value=False)):
+                self.assertEqual(setup_xhs_mcp.status(Namespace())["status"], "installed")
 
 
 if __name__ == "__main__":

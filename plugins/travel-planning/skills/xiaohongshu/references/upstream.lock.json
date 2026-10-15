@@ -4,13 +4,30 @@
   "version": "v2.5.0",
   "commit": "6583124dfda92312b6bc19a042a6acfae63fe498",
   "license": "Apache-2.0",
-  "integration": "local Streamable HTTP MCP with separately installed verified release binaries",
-  "endpoint": "http://127.0.0.1:18060/mcp",
+  "integration": "local Streamable HTTP MCP; pinned source plus reproducible local search-wait repair",
+  "endpoint": "http://127.0.0.1:18061/mcp",
   "assets": {
     "xiaohongshu-mcp-darwin-arm64": "sha256:3e32e08c3403d22a5efef2f06aa52630b458819fc54474cba23e896c7092c38e",
     "xiaohongshu-login-darwin-arm64": "sha256:db5d07c03933b8192dab726d896a028721b096ea452f6e9967ef63a30618ba99",
     "xiaohongshu-mcp-linux-amd64": "sha256:2695820af3a924412c0e555042b81a2598d144342539d4ebea18b17d56c85fbf",
     "xiaohongshu-login-linux-amd64": "sha256:367c865f3adc4dfa3407417401a911da313765da12680d1d8f46cae3ea124393"
   },
-  "installer": "skills/xiaohongshu/scripts/setup.py"
+  "installer": "skills/xiaohongshu/scripts/setup.py",
+  "local_repair": {
+    "version": "search-ready-v1",
+    "source_sha256": "881350807ed7cc07c47820a5d554c7092593b2a040302cec67e27c6e63d0f7c3",
+    "patch": "references/search-wait.patch",
+    "source_overlay": "scripts/search_ready.go",
+    "go_version": "go1.25.5",
+    "toolchains": {
+      "darwin-arm64": {
+        "filename": "go1.25.5.darwin-arm64.tar.gz",
+        "sha256": "bed8ebe824e3d3b27e8471d1307f803fc6ab8e1d0eb7a4ae196979bd9b801dd3"
+      },
+      "linux-x86_64": {
+        "filename": "go1.25.5.linux-amd64.tar.gz",
+        "sha256": "9e9b755d63b36acf30c12a9a3fc379243714c1c6d3dd72861da637f336ebb35b"
+      }
+    }
+  }
 }

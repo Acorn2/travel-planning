@@ -1,3 +1,15 @@
+# 小红书运行时构建（2026-10-14）
+
+固定 xpzouying/xiaohongshu-mcp v2.5.0 提交，叠加 search-ready-v1 本地补丁。Python标准库负责安装编排、归档校验与构建清单；curl使用系统信任库下载固定SHA256的源码/Go1.25.5归档，patch应用补丁，隔离Go使用上游go.mod/go.sum及模块校验库构建。构建不修改全局PATH或安装全局Go，首次安装增加工具链下载与编译成本。支持平台仍为macOS arm64与Linux x86_64，本次仅实测macOS。Go浏览器回归夹具通过TRAVEL_XHS_TEST_BROWSER指定本机浏览器；未提供时明确跳过浏览器夹具。生产使用上游独立浏览器。
+
+# 小红书搜索设计实现（2026-10-14）
+
+xhs_search_contract.py 使用现有 Python 标准库和 JSON 归档，生成开放关键词、校验来源链并审查搜索记录；xhs-discover 复用既有 MCP 搜索适配器，不新增供应商或依赖。返回数从真实笔记卡统计，平台总量不混入；纳秒顺序标记区分同秒调用，缓存复用保留原观察身份。脚本与 schema 随运行包分发，研究记录保持私有。
+
+# 小红书评论契约（2026-10-14）
+
+沿用锁定的 xpzouying/xiaohongshu-mcp v2.5.0 与 Python 标准库；以锁定提交的 types.go/MCP 参数定义核对 comments.list 和 subComments。xhs_comment_contract.py 复用既有原子 JSON 写入、SHA-256 和时间解析，归档有限证据并在装配、审查与渲染中共用门槛；无新依赖、数据库、付费服务或后台任务。规则评分只筛候选，Agent 负责有上下文的语义判断，关键规则回官方核验。新 schema 与 reference 随安装包分发，研究证据与凭证继续排除。
+
 # 调用范围与计时（2026-10-12）
 
 复用 Python 标准库的 JSON、SHA-256、monotonic、UTC 时间和原子文件替换；每次调用单独保存计时文件，避免并行任务覆盖一份汇总。相同查询用本机 fcntl（POSIX）或 msvcrt（Windows）文件锁协调，报告再聚合；没有跨设备或分布式协调。短时缓存只存供应商既有脱敏结果，不新增依赖、凭证、数据库或后台调度。完整运行耗时需阶段标记，脚本无法自动测量宿主直接工具调用与模型思考。

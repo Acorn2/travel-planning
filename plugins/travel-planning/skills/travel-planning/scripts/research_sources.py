@@ -40,6 +40,8 @@ from source_adapters import (  # noqa: E402
 )
 from research_workspace import INVENTORY_PRODUCTS_BY_DOMAIN, WorkspaceError, read_json as read_workspace_json, store_source_snapshot  # noqa: E402
 import execution_log  # noqa: E402
+import xhs_comment_contract  # noqa: E402
+import xhs_search_contract  # noqa: E402
 from xhs_images import cache_images, prepare_images  # noqa: E402
 from scripts.providers.amap_mcp import (  # noqa: E402
     command as amap_mcp_command,
@@ -61,7 +63,7 @@ NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "travel-planning/1.0 (read-only public API client)"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_CONFIG_FILE = source_config_file(os.environ)
-XHS_DEFAULT_URL = "http://127.0.0.1:18060/mcp"
+XHS_DEFAULT_URL = "http://127.0.0.1:18061/mcp"
 XHS_DEFAULT_DATA_ROOT = Path.home() / ".local" / "share" / "travel-planning" / "xiaohongshu-mcp"
 XHS_DATA_ROOT = Path(
     os.environ.get(
@@ -91,12 +93,15 @@ PREFLIGHT_SOURCES = (
 )
 
 SOURCE_REVISION = hashlib.sha256(Path(__file__).read_bytes() +
-    Path(execution_log.__file__).read_bytes() + (SCRIPTS_DIR / "source_adapters.py").read_bytes()).hexdigest()
+    Path(execution_log.__file__).read_bytes() + Path(xhs_comment_contract.__file__).read_bytes() +
+    Path(xhs_search_contract.__file__).read_bytes() +
+    (SCRIPTS_DIR / "source_adapters.py").read_bytes()).hexdigest()
 QUERY_PHASES = {
     "preflight": "preflight", "xhs-health": "preflight", "xhs-images": "research",
     "weather": "weather", "amap-place": "research", "amap-route": "transport",
     "osm-place": "research", "xhs-search": "research", "xhs-detail": "research",
-    "xhs-login-status": "preflight",
+    "xhs-login-status": "preflight", "xhs-sample": "research",
+    "xhs-discover": "research",
 }
 
 
@@ -132,6 +137,11 @@ def run_query(args: argparse.Namespace, tool: str, parameters: dict[str, Any], c
     if not workspace:
         return callback()
     root = execution_log.workspace_root(workspace)
+    if tool in {"xhs-search", "xhs-discover"}:
+        try:
+            args._search_design = xhs_search_contract.validate_search(args)
+        except ValueError as error:
+            raise SourceError(str(error)) from error
     key = reuse_key or execution_log.fingerprint({"tool": tool, "parameters": parameters,
         "revision": SOURCE_REVISION, "context": source_context(source_id)})
     metadata: dict[str, Any] = {}
@@ -150,14 +160,24 @@ def run_query(args: argparse.Namespace, tool: str, parameters: dict[str, Any], c
                 started = time.monotonic()
                 try:
                     payload = callback()
-                except BaseException:
+                except BaseException as error:
                     # Preserve archived evidence, but invalidate the memo/proof after a failed refresh.
                     execution_log.write_json(root / "state/execution/cache" / f"{key}.json", {"key": key, "invalidated_at": execution_log.stamp()})
                     if source_id:
                         execution_log.write_json(root / "state/execution/cache" / f"{health_key(source_id)}.json", {"invalidated_at": execution_log.stamp()})
+                    if tool in {"xhs-search", "xhs-discover"}:
+                        xhs_search_contract.store_search(root, {
+                            "search_design": args._search_design, "query": {"keyword": args.keyword},
+                            "checked_at": checked_at(), "search_status": "failed",
+                            "observed_at_ns": time.time_ns(),
+                            "failure_kind": getattr(error, "failure_kind", "query_failed"),
+                            "search_attempts": getattr(error, "search_attempts", []),
+                        }, getattr(args, "task_id", None))
                     raise
                 execution_log.write_json(root / "state/execution/cache" / f"{key}.json", {"key": key, "invalidated_at": execution_log.stamp()})
-                execution_log.store_result(root, key, payload)
+                # A fallback without the requested filters is a different query.
+                if not (tool in {"xhs-search", "xhs-discover"} and (payload.get("query") or {}).get("requested_filters")):
+                    execution_log.store_result(root, key, payload)
                 metadata = {"mode": "fresh", "query_key": key}
                 if prove_health and source_id and payload.get("status") in {"platform_reported", "community_reported", "no_results"}:
                     captured = (payload.get("freshness") or {}).get("checked_at") or payload.get("checked_at")
@@ -174,6 +194,10 @@ def run_query(args: argparse.Namespace, tool: str, parameters: dict[str, Any], c
             if execution_log.empty_result(payload):
                 entry["status"] = "no_results"
     metadata["elapsed_ms"] = round((time.monotonic() - call_started) * 1000)
+    if tool == "xhs-detail":
+        xhs_comment_contract.store_capture(root, payload, getattr(args, "task_id", None))
+    if tool in {"xhs-search", "xhs-discover"}:
+        xhs_search_contract.store_search(root, payload, getattr(args, "task_id", None))
     args._execution = metadata
     return payload
 
@@ -568,10 +592,40 @@ def xhs_health(_: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def xhs_failure_kind(message: str, default: str = "provider_error") -> str:
+    lower = message.lower()
+    # A challenge or rate limit takes priority over an accompanying deadline.
+    if any(word in lower for word in ("验证码", "设备验证", "安全验证", "风控", "滑块", "操作频繁",
+                                      "访问频繁", "异常访问", "captcha", "risk control", "security verification")):
+        return "verification_required"
+    if any(word in lower for word in ("429", "quota", "rate limit", "too many requests")):
+        return "quota_exceeded"
+    if any(word in lower for word in ("未登录", "请登录", "登录过期", "登录已过期", "登录失效", "登录已失效",
+                                      "not logged in", "login required", "login expired", "cookie expired")):
+        return "login_required"
+    if any(word in lower for word in ("筛选面板里没有", "读取筛选面板失败", "悬停筛选按钮失败", "点击筛选选项")):
+        return "filter_unavailable"
+    return default
+
+
 def xhs_login_status(args: argparse.Namespace) -> dict[str, Any]:
-    data = xhs_mcp_call("check_login_status", {}, timeout=getattr(args, "timeout", 60))
+    try:
+        data = xhs_mcp_call("check_login_status", {}, timeout=getattr(args, "timeout", 60))
+    except AdapterError as error:
+        kind = xhs_failure_kind(str(error), error.failure_kind)
+        if kind == "login_required":
+            data = {"text": "未登录"}
+        elif kind in {"verification_required", "quota_exceeded"}:
+            raise AdapterError(kind, "小红书要求人工验证或限制访问；请本人处理后再查询") from error
+        else:
+            raise
     text = data.get("text", "") if isinstance(data, dict) else str(data)
-    logged_in = "未登录" not in text and ("已登录" in text or "logged in" in text.lower())
+    failure = xhs_failure_kind(text)
+    if failure in {"verification_required", "quota_exceeded"}:
+        raise AdapterError(failure, "小红书要求人工验证或限制访问；请本人处理后再查询")
+    logged_in = failure != "login_required" and ("已登录" in text or "logged in" in text.lower())
+    if not logged_in and failure != "login_required":
+        raise AdapterError("invalid_response", "小红书登录检查未返回可识别的登录状态")
     return {
         "status": "authenticated" if logged_in else "login_required",
         "provider": "xpzouying/xiaohongshu-mcp（非官方）",
@@ -580,10 +634,10 @@ def xhs_login_status(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def require_xhs_login(timeout: int = 60, query_args: argparse.Namespace | None = None) -> None:
+def require_xhs_login(timeout: int = 60, query_args: argparse.Namespace | None = None, *, refresh: bool = False) -> None:
     login_args = argparse.Namespace(timeout=timeout, workspace=getattr(query_args, "workspace", None),
         phase=getattr(query_args, "phase", None) or "preflight", task_id=getattr(query_args, "task_id", None),
-        refresh=getattr(query_args, "refresh", False))
+        refresh=refresh or getattr(query_args, "refresh", False))
     session = run_query(login_args, "check-login-status", {}, lambda: xhs_login_status(login_args),
                         "xiaohongshu", reuse_key=health_key("xiaohongshu"))
     if session.get("status") not in {"authenticated", "ready"}:
@@ -629,13 +683,15 @@ def xhs_first_value(mapping: dict[str, Any], *keys: str) -> Any:
 
 def xhs_comment_items(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
+        if any(not isinstance(item, dict) for item in value):
+            raise SourceError("小红书评论数组含无效元素，不能静默丢弃")
+        return value
     if not isinstance(value, dict):
         return []
-    for key in ("comments", "commentList", "comment_list", "items"):
+    for key in ("list", "comments", "commentList", "comment_list", "items"):
         items = value.get(key)
         if isinstance(items, list):
-            return [item for item in items if isinstance(item, dict)]
+            return xhs_comment_items(items)
     return []
 
 
@@ -675,7 +731,9 @@ def normalize_xhs_comment(
     }
     if include_replies:
         normalized["replies"] = [
-            normalize_xhs_comment(reply, include_replies=False)
+            {**normalize_xhs_comment(reply, include_replies=False),
+             "parent_comment_id": normalized["comment_id"],
+             "parent_excerpt": xhs_excerpt(normalized["content"], limit=180)}
             for reply in replies
         ]
     return normalized
@@ -861,10 +919,16 @@ def score_xhs_comment(
     specificity_markers = (
         (r"\d", "包含数字或时长"),
         (r"\d{1,2}月|\d{1,2}日|昨天|今天|本周|周末|工作日|早上|晚上", "包含具体时间"),
-        (r"东门|西门|南门|北门|入口|出口|停车场|地铁|公交|餐厅|景区", "包含具体地点或对象"),
+        (r"东门|西门|南门|北门|入口|出口|停车场|地铁|公交|餐厅|景区|夜市|小吃街|饭庄|菜馆|东站|游客中心|豆浆|砂锅|肥鱼|份量|太咸|太辣", "包含具体地点或对象"),
         (r"建议|最好|需要|必须|不要|可以|实际|现场|到了|进场|离开", "包含可执行动作"),
     )
     specificity_hits = sum(bool(re.search(pattern, text)) for pattern, _ in specificity_markers)
+    parent = str(comment.get("parent_excerpt") or "")
+    if parent and re.search(r"不用|需要|可以|取消|改成|已经|关闭|开放|不对|不是|没必要|不值", text):
+        if topic == XHS_COMMENT_DEFAULT_TOPIC:
+            topic = classify_xhs_comment_topic(parent)
+            relevance = 30 if topic != XHS_COMMENT_DEFAULT_TOPIC else 5
+        specificity_hits = max(specificity_hits, 1)
     specificity = min(20, specificity_hits * 5)
     reasons.extend(label for pattern, label in specificity_markers if re.search(pattern, text))
     if specificity == 0:
@@ -887,9 +951,12 @@ def score_xhs_comment(
     if engagement:
         reasons.append("有互动反馈")
 
-    is_question = bool(
-        re.search(r"请问|求问|想问|有人知道|有没有人|怎么去|多少钱啊|？|\?", text)
+    has_question = bool(
+        re.search(r"请问|求问|想问|求推荐|有人知道|有没有|有什么|哪里|哪家|怎么样|好不好|是不是|怎么去|多少钱啊|吗|？|\?", text)
     )
+    # A question mark also appears in corrections and rhetorical questions.
+    factual_signal = bool(re.search(r"亲测|实测|现场|刚去|去过|到过|当天|昨天|今天|实际|我.*(?:去|等|排|花)", text))
+    is_question = has_question and not (factual_signal and specificity_hits >= 2)
     is_promotion = topic == "推广或疑似广告"
     is_generic = bool(
         len(text) <= 18
@@ -905,7 +972,7 @@ def score_xhs_comment(
 
     penalty = (12 if is_question else 0) + (20 if is_promotion else 0) + (10 if is_generic else 0)
     score = max(0, min(100, relevance + recency + specificity + firsthand + engagement - penalty))
-    eligible = score >= 40 and not is_question and not is_promotion and not is_generic
+    eligible = score >= 40 and specificity > 0 and not is_question and not is_promotion and not is_generic
     return {
         "topic": topic,
         "score": score,
@@ -929,6 +996,8 @@ def _flatten_xhs_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]
             if isinstance(reply, dict):
                 child = dict(reply)
                 child["_parent_comment_id"] = comment.get("comment_id")
+                child["parent_comment_id"] = comment.get("comment_id")
+                child["parent_excerpt"] = xhs_excerpt(comment.get("content"), limit=180)
                 flattened.append(child)
     return flattened
 
@@ -1106,7 +1175,7 @@ def build_xhs_comment_insights(
 ) -> dict[str, Any]:
     """Build the compact evidence layer consumed by travel planning."""
     flattened = _flatten_xhs_comments(comments)
-    groups = group_xhs_comment_signals(flattened, now=now)
+    groups = group_xhs_comment_signals(comments, now=now)
     conflicts = detect_xhs_comment_conflicts(groups, comments=flattened)
     conflict_counts: dict[str, int] = {}
     for conflict in conflicts:
@@ -1152,6 +1221,8 @@ def build_xhs_comment_insights(
                 "reply_count": comment.get("reply_count"),
                 "value_score": analysis["score"],
                 "excerpt": xhs_excerpt(_xhs_comment_text(comment), limit=180),
+                "parent_comment_id": comment.get("parent_comment_id"),
+                "parent_excerpt": comment.get("parent_excerpt"),
             }
             for comment, analysis in ranked[:5]
         ]
@@ -1202,9 +1273,21 @@ def build_xhs_comment_insights(
     )
     return {
         "comment_insights": insights,
+        "discussion_samples": [
+            {"comment_id": comment.get("comment_id"),
+             "excerpt": xhs_excerpt(_xhs_comment_text(comment), limit=180),
+             "parent_comment_id": comment.get("parent_comment_id"),
+             "parent_excerpt": comment.get("parent_excerpt"),
+             "published_at": comment.get("published_at")}
+            for comment in sorted(flattened, key=lambda c: (
+                bool(c.get("parent_comment_id")), score_xhs_comment(c, now=now)["score"]
+            ), reverse=True)[:20]
+        ],
         "needs_recheck": needs_recheck,
         "comment_analysis": {
             "input_count": len(flattened),
+            "top_level_count": len(comments),
+            "reply_count": len(flattened) - len(comments),
             "eligible_count": eligible_count,
             "filtered_count": len(flattened) - eligible_count,
             "duplicate_count": duplicate_count,
@@ -1214,7 +1297,73 @@ def build_xhs_comment_insights(
     }
 
 
+def search_xhs_with_recovery(args: argparse.Namespace, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Retry a completed search failure once; never retry a platform challenge."""
+    attempts: list[dict[str, Any]] = []
+    for number in (1, 2):
+        started = time.monotonic()
+        attempt = {"attempt": number, "checked_at": checked_at(), "filters": arguments.get("filters", {})}
+        try:
+            data = xhs_mcp_call("search_feeds", arguments, timeout=120)
+            if not isinstance(data, dict) or not isinstance(data.get("feeds"), list):
+                raise SourceError("xiaohongshu-mcp 缺少可识别的搜索列表，不能将解析失败记为0篇")
+            if any(not isinstance(feed, dict) or (feed.get("modelType", "note") == "note" and
+                   (not feed.get("id") or not isinstance(feed.get("noteCard"), dict))) for feed in data["feeds"]):
+                raise SourceError("xiaohongshu-mcp 搜索笔记卡格式无效，不能将解析失败记为0篇")
+        except (AdapterError, SourceError) as error:
+            kind = xhs_failure_kind(str(error), getattr(error, "failure_kind", "invalid_response"))
+            attempt.update(status="failed", failure_kind=kind,
+                           elapsed_ms=round((time.monotonic() - started) * 1000))
+            attempts.append(attempt)
+            messages = {
+                "timeout": "小红书搜索页面等待超时；恢复后仍失败时请检查 MCP 浏览器页面和服务日志",
+                "filter_unavailable": "小红书筛选控件不可用，请用无筛选搜索并从笔记详情核对条件",
+                "login_required": "小红书登录已失效，请先执行 setup.py login 完成本人扫码，再启动 MCP 服务",
+                "verification_required": "小红书要求人工验证或限制访问；请本人处理后再查询",
+                "quota_exceeded": "小红书限制请求频率；请稍后再查询",
+            }
+            if isinstance(error, AdapterError):
+                error = AdapterError(kind, messages.get(kind, "小红书搜索失败，请检查本机 MCP 服务和日志"))
+            error.failure_kind = kind
+            error.search_attempts = attempts
+            retry = kind == "timeout" or (kind == "filter_unavailable" and bool(arguments.get("filters")))
+            if number == 2 or not retry:
+                raise error
+            # Ignore a cached healthy result: recovery must observe the live login.
+            try:
+                require_xhs_login(query_args=args, refresh=True)
+            except (AdapterError, SourceError) as login_error:
+                attempt["login_recheck"] = getattr(login_error, "failure_kind", "invalid_response")
+                login_error.search_attempts = attempts
+                raise
+            attempt["login_recheck"] = "authenticated"
+            if kind == "filter_unavailable":
+                arguments = {"keyword": args.keyword}
+                attempt["recovery"] = "retry_without_filters"
+            else:
+                attempt["recovery"] = "retry_same_query"
+            time.sleep(2)
+        else:
+            attempt.update(status="success" if data["feeds"] else "no_results",
+                           elapsed_ms=round((time.monotonic() - started) * 1000))
+            attempts.append(attempt)
+            return data, attempts
+    raise AssertionError("小红书搜索超过恢复次数上限")
+
+
+def xhs_state(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        root = execution_log.workspace_root(args.workspace)
+        return xhs_search_contract.observation_state(root)
+    except ValueError as error:
+        raise SourceError(str(error)) from error
+
+
 def xhs_search(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        search_design = xhs_search_contract.validate_search(args)
+    except ValueError as error:
+        raise SourceError(str(error)) from error
     require_xhs_login(query_args=args)
     value_map = {
         "sort_by": {
@@ -1241,13 +1390,13 @@ def xhs_search(args: argparse.Namespace) -> dict[str, Any]:
     arguments: dict[str, Any] = {"keyword": args.keyword}
     if upstream_filters:
         arguments["filters"] = upstream_filters
-    data = xhs_mcp_call(
-        "search_feeds",
-        arguments,
-    )
-    if not isinstance(data, dict):
-        raise SourceError("xiaohongshu-mcp 搜索返回格式无效")
-    feeds = [feed for feed in (data.get("feeds") or []) if isinstance(feed, dict)]
+    data, attempts = search_xhs_with_recovery(args, arguments)
+    dropped_filters = any(attempt.get("recovery") == "retry_without_filters" for attempt in attempts)
+    applied_filters = {key: "relevance" if key == "sort_by" else "all" for key in filters} if dropped_filters else filters
+    feeds = [feed for feed in (data.get("feeds") or []) if isinstance(feed, dict)
+             and feed.get("id") and isinstance(feed.get("noteCard"), dict)
+             and feed.get("modelType", "note") == "note"]
+    attempts[-1]["status"] = "success" if feeds else "no_results"
     for feed in feeds:
         if feed.get("id") and not feed.get("sourceUrl"):
             feed["sourceUrl"] = f"https://www.xiaohongshu.com/explore/{feed['id']}"
@@ -1256,9 +1405,18 @@ def xhs_search(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "status": "community_reported",
         "provider": "xpzouying/xiaohongshu-mcp（非官方）",
-        "query": {"keyword": args.keyword, "filters": filters},
+        "query": {"keyword": args.keyword, "filters": applied_filters,
+                  **({"requested_filters": filters} if dropped_filters else {})},
+        "search_attempts": attempts,
+        **({"warnings": ["筛选控件失败，本次返回无筛选结果；请从详情核对发布时间、笔记类型等原筛选条件。"]}
+           if dropped_filters else {}),
         "results": normalized,
         "count": len(normalized),
+        "returned_count": len(feeds),
+        "observed_at_ns": time.time_ns(),
+        "candidate_note_ids": [feed["id"] for feed in feeds],
+        "search_status": "success" if feeds else "no_results",
+        **({"search_design": search_design} if search_design else {}),
         "checked_at": checked_at(),
         "source": {
             "title": "小红书公开笔记搜索",
@@ -1274,15 +1432,15 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
     cached = read_xhs_mcp_token_cache().get("notes", {}).get(args.note_id)
     if not cached or not cached.get("xsec_token"):
         raise SourceError("未找到该笔记的临时访问令牌；请先用 xhs-search 搜索，再读取详情")
-    all_comments = bool(getattr(args, "all_comments", False))
-    include_replies = bool(getattr(args, "include_replies", False)) and all_comments
+    all_comments = bool(getattr(args, "all_comments", True))
+    include_replies = bool(getattr(args, "include_replies", True)) and all_comments
     comment_limit = getattr(args, "comment_limit", 20)
-    reply_limit = getattr(args, "reply_limit", 10)
+    reply_limit = getattr(args, "reply_limit", 50)
     scroll_speed = getattr(args, "scroll_speed", "normal")
     if comment_limit < 1 or comment_limit > 100:
         raise SourceError("评论数量必须在 1 到 100 之间")
-    if reply_limit < 1 or reply_limit > 50:
-        raise SourceError("回复阈值必须在 1 到 50 之间")
+    if reply_limit < 1 or reply_limit > 1000:
+        raise SourceError("回复阈值必须在 1 到 1000 之间")
     arguments = {
         "feed_id": args.note_id,
         "xsec_token": cached["xsec_token"],
@@ -1307,6 +1465,16 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
     note = detail.get("note") or {}
     user = note.get("user") or {}
     interactions = note.get("interactInfo") or {}
+    container = xhs_first_value(detail, "comments", "commentList", "comment_list")
+    if container is None:
+        container = xhs_first_value(note, "comments", "commentList", "comment_list")
+    if container is None or not isinstance(container, (list, dict)):
+        raise SourceError("小红书详情缺少可识别的评论列表，不能将未取得评论记为0条")
+    explicit_empty = (isinstance(container, dict) and "list" in container and container["list"] is None
+                      and str(interactions.get("commentCount")) == "0" and container.get("hasMore") is False)
+    if isinstance(container, dict) and not explicit_empty and not any(isinstance(container.get(k), list) for k in
+            ("list", "comments", "commentList", "comment_list", "items")):
+        raise SourceError("小红书评论列表格式变化，不能将解析失败记为0条")
     comments = normalize_xhs_comments(detail, include_replies=include_replies)
     comment_insights = build_xhs_comment_insights(comments)
     note_id = str(note.get("noteId") or args.note_id)
@@ -1332,6 +1500,7 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
         },
         "comments": comments,
         "comment_insights": comment_insights["comment_insights"],
+        "discussion_samples": comment_insights["discussion_samples"],
         "needs_recheck": comment_insights["needs_recheck"],
         "comment_analysis": comment_insights["comment_analysis"],
         "image_reading": {"image_count": image_count, "status": "not_read" if image_count else "no_images",
@@ -1343,10 +1512,118 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
             "include_replies": include_replies,
             "reply_limit": reply_limit if all_comments and include_replies else None,
             "scroll_speed": scroll_speed if all_comments else None,
+            "reported_total": interactions.get("commentCount"),
+            "has_more": container.get("hasMore") if isinstance(container, dict) else None,
+            "coverage": "partial_or_unknown",
+            "unexpanded_reply_threads": sum(
+                _xhs_numeric_value(c.get("reply_count")) > len(c.get("replies") or []) for c in comments
+            ),
+            "limitations": ["数量上限是加载目标，不保证取得全部评论；保留实际返回数量",
+                             "回复数超过阈值的讨论串可能未展开；不能据此推断不存在争议"],
         },
         "checked_at": checked_at(),
-        "disclaimer": "评论洞察仅作为近期社区体验信号；默认只读取前10条一级评论，完整评论区和临时令牌不归档，开放、价格、预约、交通和安全等关键事实需与官方来源交叉核验。",
+        "disclaimer": "评论及回复为有限样本；规则洞察只是候选，须阅读讨论上下文并记录采纳或排除理由。完整评论区和临时令牌不归档，关键事实需官方复核。",
     }
+
+
+def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
+    """Sequentially read distinct open-discovery candidates until the quota is met or blocked."""
+    try:
+        root = execution_log.workspace_root(args.workspace)
+        brief = execution_log.read_json(root / "brief.json") or {}
+        destination = str(getattr(args, "destination", None) or brief.get("destination") or "").strip()
+        if not destination:
+            raise SourceError("小红书详情采样缺少目的地")
+    except (WorkspaceError, execution_log.ExecutionError, ValueError) as error:
+        raise SourceError(str(error)) from error
+
+    processed_this_run = 0
+    fresh_detail_reads = 0
+    reused_detail_reads = 0
+    stopped_reason = None
+    stopped_failure_kind = None
+    while True:
+        progress = xhs_search_contract.sampling_progress(root, destination)
+        if progress["complete"]:
+            break
+
+        latest = progress.get("latest_search_by_scope") or {}
+        failed_searches = [scope for scope, record in latest.items() if record.get("status") == "failed"]
+        if failed_searches:
+            stopped_reason = "最新开放发现搜索失败；为避免在登录、风控或连接状态异常时继续请求，采样已停止。"
+            stopped_failure_kind = latest[failed_searches[0]].get("failure_kind") or "search_failed"
+            break
+
+        available = progress["remaining_candidate_ids_by_scope"]
+        deficits = progress["deficit_by_scope"]
+        exhausted_scopes = [scope for scope in ("eat", "play") if deficits[scope] > 0 and not available[scope]]
+        if exhausted_scopes:
+            stopped_reason = (
+                "以下主题仍有配额缺口但没有未读取候选：" + "/".join(exhausted_scopes)
+                + "；请补充对应主题的开放发现搜索后重新运行。"
+            )
+            stopped_failure_kind = "candidate_exhausted"
+            break
+        priority = [scope for scope in ("eat", "play") if deficits[scope] > 0 and available[scope]]
+        if not priority:
+            priority = [scope for scope in ("eat", "play") if available[scope]]
+            if priority:
+                priority.sort(key=lambda scope: (progress["sampled_by_scope"][scope], 0 if scope == "eat" else 1))
+        if not priority:
+            stopped_reason = "已没有可读取的未采样候选；当前搜索返回不足以达到配额。"
+            break
+
+        scope = priority[0]
+        note_id = available[scope][0]
+        detail_args = argparse.Namespace(
+            command="xhs-detail", workspace=args.workspace, task_id=getattr(args, "task_id", None),
+            phase=getattr(args, "phase", None), refresh=getattr(args, "refresh", False),
+            note_id=note_id, all_comments=True, include_replies=True,
+            comment_limit=20, reply_limit=50, scroll_speed="normal",
+        )
+
+        def read_detail() -> dict[str, Any]:
+            payload = xhs_detail(detail_args)
+            actual_id = str((payload.get("note") or {}).get("note_id") or "")
+            if payload.get("status") != "community_reported" or actual_id != note_id:
+                raise SourceError("详情返回的笔记身份或评论结构未通过核验")
+            return payload
+
+        try:
+            run_query(
+                detail_args,
+                "xhs-detail",
+                {"note_id": note_id, "all_comments": True, "include_replies": True,
+                 "comment_limit": 20, "reply_limit": 50, "scroll_speed": "normal"},
+                read_detail,
+                "xiaohongshu",
+                prove_health=True,
+            )
+            processed_this_run += 1
+            if (getattr(detail_args, "_execution", {}) or {}).get("mode") == "reused":
+                reused_detail_reads += 1
+            else:
+                fresh_detail_reads += 1
+        except (AdapterError, SourceError, WorkspaceError, execution_log.ExecutionError, ValueError, OSError) as error:
+            stopped_reason = "详情或评论读取失败；按采样策略停止后续请求。"
+            stopped_failure_kind = getattr(error, "failure_kind", None) or "detail_read_failed"
+            break
+
+        # Keep a small pause between platform detail requests.
+        time.sleep(1)
+
+    final_progress = xhs_search_contract.sampling_progress(root, destination)
+    report = {key: value for key, value in final_progress.items()
+              if key not in {"remaining_candidate_ids_by_scope", "latest_search_by_scope"}}
+    report.update({
+        "status": "complete" if final_progress["complete"] else "incomplete",
+        "processed_this_run": processed_this_run,
+        "fresh_detail_reads_this_run": fresh_detail_reads,
+        "reused_detail_reads_this_run": reused_detail_reads,
+        "stopped_reason": stopped_reason,
+        "failure_kind": stopped_failure_kind,
+    })
+    return report
 
 
 def xhs_images(args: argparse.Namespace) -> dict[str, Any]:
@@ -2334,23 +2611,44 @@ def build_parser() -> argparse.ArgumentParser:
     command = subparsers.add_parser("xhs-login-status", help="检查小红书本机登录态")
     command.set_defaults(handler=xhs_login_status)
 
-    command = subparsers.add_parser("xhs-search", help="搜索小红书公开笔记并脱敏输出")
-    command.add_argument("--keyword", required=True)
-    command.add_argument("--sort-by", choices=["relevance", "latest", "most_liked", "most_commented", "most_collected"], default="relevance")
-    command.add_argument("--note-type", choices=["all", "video", "image"], default="all")
-    command.add_argument("--publish-time", choices=["all", "day", "week", "half_year"], default="all")
-    command.add_argument("--search-scope", choices=["all", "viewed", "unviewed", "following"], default="all")
-    command.add_argument("--location", choices=["all", "same_city", "nearby"], default="all")
-    command.add_argument("--limit", type=int, default=10, choices=range(1, 21), metavar="1-20")
-    command.set_defaults(handler=xhs_search)
+    command = subparsers.add_parser("xhs-state", help="汇总当前工作区最新搜索和评论观察；不探测上游")
+    command.add_argument("--workspace", required=True)
+    command.set_defaults(handler=xhs_state)
+
+    command = subparsers.add_parser("xhs-sample", help="自动去重读取发现候选，直到小红书详情采样配额达标")
+    command.add_argument("--workspace", required=True)
+    command.add_argument("--destination", help="单个目的地；省略时使用工作区 brief.destination")
+    command.set_defaults(handler=xhs_sample)
+
+    for name in ("xhs-search", "xhs-discover"):
+        command = subparsers.add_parser(name, help="小红书开放发现与可追溯补查")
+        command.add_argument("--destination", required=name == "xhs-discover", help="单个目的地名称，不带天数")
+        command.add_argument("--topic", choices=["eat", "play"], required=name == "xhs-discover")
+        if name == "xhs-search":
+            command.add_argument("--keyword", required=True)
+            command.add_argument("--search-stage", choices=["discovery", "detail"], default="discovery")
+            command.add_argument("--target-source-id", help="具体对象来自已读来源的 ID")
+            command.add_argument("--user-request", help="仅用户明确指定查询时填写其真实要求")
+        else:
+            command.add_argument("--workspace", required=True)
+            command.set_defaults(search_stage="discovery")
+        command.add_argument("--sort-by", choices=["relevance", "latest", "most_liked", "most_commented", "most_collected"], default="relevance")
+        command.add_argument("--note-type", choices=["all", "video", "image"], default="all")
+        command.add_argument("--publish-time", choices=["all", "day", "week", "half_year"], default="all")
+        command.add_argument("--search-scope", choices=["all", "viewed", "unviewed", "following"], default="all")
+        command.add_argument("--location", choices=["all", "same_city", "nearby"], default="all")
+        command.add_argument("--limit", type=int, default=10, choices=range(1, 21), metavar="1-20")
+        command.set_defaults(handler=xhs_search)
 
     command = subparsers.add_parser("xhs-detail", help="读取已搜索到的小红书笔记详情")
     command.add_argument("--note-id", required=True)
     command.add_argument(
         "--all-comments",
-        action="store_true",
-        help="滚动加载更多一级评论；默认只返回上游默认的前10条一级评论",
+        action="store_true", default=True,
+        help="默认滚动读取有限评论样本（不是全集）",
     )
+    command.add_argument("--sample-comments", dest="all_comments", action="store_false",
+                         help="仅路线前轻量预研或明确降级时使用上游默认评论样本")
     command.add_argument(
         "--comment-limit",
         type=int,
@@ -2361,15 +2659,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     command.add_argument(
         "--include-replies",
-        action="store_true",
-        help="扩展评论模式下展开二级回复",
+        action="store_true", default=True,
+        help="默认在扩展模式下展开二级回复",
     )
+    command.add_argument("--no-replies", dest="include_replies", action="store_false",
+                         help="明确降级时不展开二级回复，须记录局限")
     command.add_argument(
         "--reply-limit",
         type=int,
-        default=10,
-        choices=range(1, 51),
-        metavar="1-50",
+        default=50,
+        choices=range(1, 1001),
+        metavar="1-1000",
         help="扩展评论模式下跳过回复数超过该阈值的评论",
     )
     command.add_argument(
@@ -2523,7 +2823,7 @@ def build_parser() -> argparse.ArgumentParser:
             query_parser.add_argument("--task-id", help="记录调用所属任务；非报价查询可省略")
         query_parser.add_argument("--phase", type=execution_log.identifier,
                                   help="调用所属研究阶段；省略时按命令类型分类")
-        if name not in {"xhs-health", "xhs-images", "xhs-login-status"}:
+        if name not in {"xhs-health", "xhs-images", "xhs-login-status", "xhs-state", "xhs-sample"}:
             query_parser.add_argument("--refresh", action="store_true", help="忽略本次工作区的有效复用记录，重新请求")
     return parser
 
@@ -2531,10 +2831,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        if args.command == "xhs-discover":
+            args.keyword = xhs_search_contract.discovery_keyword(args.destination, args.topic)
         with execution_log.measured(getattr(args, "workspace", None), query_phase(args), args.command,
                                     task_id=getattr(args, "task_id", None)) as command_span:
             source_ids = {"weather": "open-meteo", "amap-place": "amap-api", "amap-route": "amap-api",
-                          "xhs-search": "xiaohongshu", "xhs-detail": "xiaohongshu", "osm-place": "osm"}
+                          "xhs-search": "xiaohongshu", "xhs-discover": "xiaohongshu",
+                          "xhs-detail": "xiaohongshu", "osm-place": "osm"}
             if args.command in source_ids:
                 source_id = source_ids[args.command]
                 payload = run_query(args, args.command, command_parameters(args), lambda: args.handler(args),
@@ -2546,12 +2849,16 @@ def main() -> int:
                                     "xiaohongshu", reuse_key=health_key("xiaohongshu"))
             else:
                 payload = args.handler(args)
+            if args.command == "xhs-sample" and payload.get("status") != "complete":
+                command_span["status"] = "failed"
             if args.command == "preflight" and payload.get("status") == "unavailable":
                 command_span["status"] = "failed"
         if args.command != "preflight" and getattr(args, "_execution", None):
             payload = {**payload, "execution": args._execution}
         output(payload)
         if args.command == "preflight" and payload.get("status") == "unavailable":
+            return 2
+        if args.command == "xhs-sample" and payload.get("status") != "complete":
             return 2
         return 0
     except AdapterError as error:
@@ -2562,11 +2869,14 @@ def main() -> int:
                 "failure_kind": error.failure_kind,
                 "message": str(error),
                 "checked_at": checked_at(),
+                **({"search_attempts": error.search_attempts} if getattr(error, "search_attempts", None) else {}),
             }
         )
         return 2
-    except (SourceError, WorkspaceError, execution_log.ExecutionError) as error:
-        output({"status": "error", "message": str(error), "checked_at": checked_at()})
+    except (SourceError, WorkspaceError, execution_log.ExecutionError, ValueError) as error:
+        output({"status": "error", "message": str(error), "checked_at": checked_at(),
+                **({"failure_kind": error.failure_kind} if getattr(error, "failure_kind", None) else {}),
+                **({"search_attempts": error.search_attempts} if getattr(error, "search_attempts", None) else {})})
         return 2
 
 
