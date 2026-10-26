@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 import zipfile
 
-from prepare_share import LocalDependencyScanner
+from prepare_share import LocalDependencyScanner, xhs_comment_contract
 
 FILES = {"index.html", "_trip.json", "_headers"}
 SITE_SCHEMA = "travel-site/v1"
@@ -104,6 +104,7 @@ def publication_lock(state_file: Path):
 def prepare(source: Path, trip_id: str, output_dir: Path) -> dict:
     validate_trip_id(trip_id)
     html = source.read_text(encoding="utf-8")
+    xhs_comment_contract.validate_page_evidence(source, html)
     scanner = LocalDependencyScanner()
     scanner.feed(html)
     if scanner.dependencies:

@@ -111,7 +111,7 @@ python3 skills/travel-planning/scripts/research_sources.py osm-place \
 
 ## 小红书体验研究
 
-搜索、详情、登录和工具参数遵循 `$xiaohongshu`。旅行研究默认只读；开放发现用带 workspace 的 `xhs-discover --destination <目的地> --topic eat/play`（两主题分别执行），自动生成推荐词并保存真实返回数量；具体对象补查绑定已读发现来源。正式详情统一用带 workspace 的 `xhs-detail`，默认目标20条一级评论并展开回复。读取正文必须同时阅读评论讨论，不能只保存正文摘要。包装命令自动持久化实际统计、候选洞察和必要问答上下文，最终用逐帖语义审查和逐洞察决策绑定 `community_evidence`；没有有效评论或失败也需明确说明。完整字段与门槛见[评论研究闭环](xhs-comment-research.md)。
+搜索、详情、登录和工具参数遵循 `$xiaohongshu`。旅行研究默认只读；开放发现用带 workspace 的 `xhs-discover --destination <目的地> --topic eat/play`（两主题分别执行），自动生成推荐词并保存真实返回数量；具体对象补查绑定已读发现来源。正式详情统一用带 workspace 的 `xhs-detail`，默认目标20条一级评论并展开回复。读取正文必须同时阅读评论讨论，不能只保存正文摘要。包装命令自动持久化实际统计、线程身份和必要问答摘录，v2 规则只排序；用 xhs-review 阅读所有已取得线程后提交语义洞察，最终用逐帖语义审查和逐洞察决策绑定 `community_evidence`；没有有效评论或失败也需明确说明。完整字段与门槛见[评论研究闭环](xhs-comment-research.md)。
 
 路线确认后的具体景点和餐厅研究可以复用 `route-context.json` 的查询词与地方美食主题，但必须重新核验具体实体、适用日期、地图位置和经营信息；不得把路线前样本数算作某家餐厅的门店口碑样本。
 

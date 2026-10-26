@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
+import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "skills" / "travel-planning" / "scripts" / "assemble_itinerary.py"
@@ -21,6 +25,50 @@ def write_json(path: Path, value: object) -> None:
 
 
 class AssembleItineraryTest(unittest.TestCase):
+    def assemble_file(self, *, plan_path=None, output_path=None):
+        arguments = ["assemble_itinerary.py", "--workspace", str(self.workspace)]
+        if plan_path is not None:
+            arguments.extend(["--plan", str(plan_path)])
+        if output_path is not None:
+            arguments.extend(["--output", str(output_path)])
+        with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+            self.assertEqual(assemble_itinerary.main(), 0)
+        return json.loads((output_path or self.workspace / "artifacts/itinerary.json").read_text())
+
+    def test_custom_output_is_used_instead_of_stale_default_json(self) -> None:
+        contract = assemble_itinerary.xhs_comment_contract
+        write_json(self.workspace / "manifest.json", {"workspace_version": 1, "xhs_comment_research_version": 2})
+        previous = self.assemble_file()
+        self.plan["planning"] = {"xhs_comment_reviews": [{
+            "note_id": "failed", "source_url": "https://www.xiaohongshu.com/explore/failed",
+            "checked_at": "2026-10-26T10:00:00Z", "review_status": "unavailable", "reason": "评论加载失败"}]}
+        write_json(self.plan_path, self.plan)
+        output = self.workspace.parent / "exports/custom.json"
+        result = self.assemble_file(output_path=output)
+        self.assertEqual(contract.workspace_issues(result, self.workspace), [])
+        self.assertNotEqual(contract.review_digest(previous), contract.review_digest(result))
+        self.assertNotIn(str(output), json.dumps(result))
+        page = self.workspace / "artifacts/custom.html"
+        html = '<html><head><meta name="xhs-review-digest" content="' + contract.review_digest(result) + '"></head></html>'
+        page.write_text(html)
+        contract.validate_page_evidence(page, html)
+        provenance = json.loads((self.workspace / "state/xhs-comment-input.json").read_text())
+        self.assertEqual(provenance["output_path"], str(output.resolve()))
+        output.rename(output.with_name("moved.json"))
+        with self.assertRaisesRegex(ValueError, "实际装配输出已不可读取"):
+            contract.validate_page_evidence(page, html)
+
+    def test_failed_output_write_preserves_previous_assembly_binding(self) -> None:
+        self.assemble_file()
+        provenance = self.workspace / "state/xhs-comment-input.json"
+        previous = provenance.read_bytes()
+        custom_plan = self.workspace.parent / "custom-plan.json"
+        write_json(custom_plan, self.plan)
+        # An existing directory cannot be used as a JSON output file.
+        with self.assertRaises(IsADirectoryError):
+            self.assemble_file(plan_path=custom_plan, output_path=self.workspace / "artifacts")
+        self.assertEqual(provenance.read_bytes(), previous)
+
     def test_comment_captures_are_assembled_without_private_excerpts(self) -> None:
         record = {"schema_version": "travel-xhs-comment-review/v1", "note_id": "n1",
             "source_url": "https://www.xiaohongshu.com/explore/n1", "checked_at": "2026-10-14T10:00:00Z",
@@ -44,6 +92,37 @@ class AssembleItineraryTest(unittest.TestCase):
         write_json(self.plan_path, self.plan)
         result = assemble_itinerary.assemble(self.workspace, self.plan_path)
         self.assertEqual(result["planning"]["xhs_comment_research_version"], 1)
+
+    def test_comment_freshness_uses_actual_custom_plan_and_tracks_changes(self) -> None:
+        contract = assemble_itinerary.xhs_comment_contract
+        failure = {"note_id": "failed", "source_url": "https://www.xiaohongshu.com/explore/failed",
+                   "checked_at": "2026-10-26T10:00:00Z", "review_status": "unavailable", "reason": "自定义计划中的失败原因"}
+        self.plan["planning"] = {"xhs_comment_reviews": [failure]}
+        default = {**self.plan, "planning": {"xhs_comment_reviews": [{**failure, "reason": "无关默认计划旧原因"}]}}
+        write_json(self.plan_path, default)
+        # Explicit --plan also supports a file outside the workspace.
+        custom_path = self.workspace.parent / "custom-plan.json"
+        write_json(custom_path, self.plan)
+        result = self.assemble_file(plan_path=custom_path)
+        self.assertEqual(contract.workspace_issues(result, self.workspace), [])
+        self.assertNotIn(str(custom_path), json.dumps(result))
+        self.assertEqual(contract.review_packet(self.workspace)["unavailable_notes"][0]["reason"], failure["reason"])
+        self.plan["planning"]["xhs_comment_reviews"][0]["reason"] = "实际输入计划已更新"
+        write_json(custom_path, self.plan)
+        self.assertTrue(contract.workspace_issues(result, self.workspace))
+        updated = self.assemble_file(plan_path=custom_path)
+        self.assertEqual(contract.workspace_issues(updated, self.workspace), [])
+        self.assertTrue(contract.workspace_issues(result, self.workspace))
+
+    def test_missing_recorded_plan_does_not_fall_back_to_default(self) -> None:
+        contract = assemble_itinerary.xhs_comment_contract
+        custom = self.workspace.parent / "custom-plan.json"
+        write_json(custom, self.plan)
+        result = self.assemble_file(plan_path=custom)
+        custom.rename(self.workspace.parent / "moved-plan.json")
+        self.assertTrue(any("实际装配计划已不可读取" in issue for issue in contract.workspace_issues(result, self.workspace)))
+        with self.assertRaisesRegex(ValueError, "实际装配计划已不可读取"):
+            contract.review_packet(self.workspace)
 
     def test_search_observations_are_assembled_and_new_gate_cannot_be_disabled(self) -> None:
         write_json(self.workspace / "manifest.json", {"xhs_search_design_version": 1})
@@ -79,6 +158,7 @@ class AssembleItineraryTest(unittest.TestCase):
         self.workspace = Path(self.temporary.name) / "trip"
         for name in ("results", "sources", "snapshots", "state", "artifacts"):
             (self.workspace / name).mkdir(parents=True, exist_ok=True)
+        write_json(self.workspace / "manifest.json", {"workspace_version": 1})
         write_json(self.workspace / "selected-route.json", {"id": "route-1", "status": "confirmed"})
         research = {"schema_version": "travel-research-state/v2", "trip_id": "trip", "tasks": []}
         write_json(self.workspace / "state" / "research.json", research)

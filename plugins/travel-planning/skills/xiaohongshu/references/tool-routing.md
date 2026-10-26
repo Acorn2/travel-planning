@@ -11,7 +11,7 @@
 | 笔记详情与评论 | `get_feed_detail` | `feed_id`、`xsec_token`；MCP 原生默认前10条，旅行包装命令默认 `load_all_comments=true, limit=20, click_more_replies=true, reply_limit=50, scroll_speed=normal`；参数是加载目标，不保证覆盖全部讨论 |
 | 用户主页 | `user_profile` | `user_id`、`xsec_token` |
 
-包装命令 `xhs-detail` 除了返回标准化 `comments`，还返回 `comment_insights`、`needs_recheck` 和 `comment_analysis`。洞察只保留高价值评论形成的主题结论；冲突主题会降低置信度并进入复核列表。
+包装命令 `xhs-detail` 返回标准化 comments、review_threads、thread_manifest 与 comment_analysis。v2 的 comment_insights/needs_recheck 为空，规则只提示阅读顺序，不自动生成共识或有价值数量；Agent 通过 xhs-review 阅读本地讨论串并提交语义洞察。
 
 锁定版本的实际详情结构为 `data.comments.list[]`，其中一级评论通过 `subComments[]` 携带回复；不得将 `comments` 对象误读为空数组。`reply_limit` 是跳过过多回复讨论串的阈值，不是每串读取条数；超过50且影响判断的讨论可在预算内显式提高 `--reply-limit`（最高1000），无法读完须保留缺口。`comment_collection.unexpanded_reply_threads` 记录返回样本中回复未读全的串数；它不代表整个评论区的缺口总量。
 

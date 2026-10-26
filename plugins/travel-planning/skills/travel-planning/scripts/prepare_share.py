@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
+
+
+COMMENT_SPEC = importlib.util.spec_from_file_location("share_comment_contract", Path(__file__).with_name("xhs_comment_contract.py"))
+assert COMMENT_SPEC and COMMENT_SPEC.loader
+xhs_comment_contract = importlib.util.module_from_spec(COMMENT_SPEC)
+COMMENT_SPEC.loader.exec_module(xhs_comment_contract)
 
 
 class LocalDependencyScanner(HTMLParser):
@@ -32,6 +39,7 @@ def prepare_share(source: Path, output_dir: Path, *, replace: bool = False) -> P
     if not source.is_file():
         raise ValueError(f"找不到 HTML 文件：{source}")
     data = source.read_bytes()
+    xhs_comment_contract.validate_page_evidence(source, data.decode("utf-8"))
     scanner = LocalDependencyScanner()
     scanner.feed(data.decode("utf-8"))
     if scanner.dependencies:

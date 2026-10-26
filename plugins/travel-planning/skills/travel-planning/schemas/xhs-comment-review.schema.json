@@ -5,6 +5,25 @@
   "required": ["note_id", "checked_at", "review_status"],
   "properties": {
     "note_id": {"type": "string", "minLength": 1},
+    "capture_id": {"type": "string", "minLength": 1},
+    "capture_purpose": {"enum": ["research", "diagnostic"]},
+    "diagnostic_reason": {"type": "string", "minLength": 1},
+    "reviewed_thread_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "thread_manifest": {
+      "readOnly": true,
+      "type": "array", "items": {
+        "type": "object", "required": ["thread_id", "comment_refs"], "properties": {
+          "thread_id": {"type": "string", "minLength": 1},
+          "comment_refs": {"type": "array", "items": {
+            "type": "object", "required": ["comment_id", "content_digest"], "properties": {
+              "comment_id": {"type": "string", "minLength": 1},
+              "parent_comment_id": {"type": ["string", "null"]},
+              "content_digest": {"type": "string", "minLength": 1}
+            }
+          }}
+        }
+      }
+    },
     "source_url": {"type": "string", "format": "uri"},
     "checked_at": {"type": "string", "format": "date-time"},
     "review_status": {"enum": ["pending", "reviewed", "unavailable"]},
@@ -23,6 +42,7 @@
       "type": "object",
       "required": ["input_count", "top_level_count", "reply_count", "eligible_count", "filtered_count", "group_count"],
       "properties": {
+        "method": {"type": "string"},
         "input_count": {"type": "integer", "minimum": 0},
         "top_level_count": {"type": "integer", "minimum": 0},
         "reply_count": {"type": "integer", "minimum": 0},
@@ -39,6 +59,11 @@
         "type": "object",
         "required": ["insight_id", "decision", "reason"],
         "properties": {
+          "subject": {"type": "string", "minLength": 1},
+          "claim": {"type": "string", "minLength": 1},
+          "comment_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "planning_effect": {"type": "string", "minLength": 1},
+          "recheck_action": {"type": "string", "minLength": 1},
           "insight_id": {"type": "string", "minLength": 1},
           "decision": {"enum": ["adopted", "rejected", "needs_recheck"]},
           "reason": {"type": "string", "minLength": 1}
@@ -52,6 +77,19 @@
     {"if": {"properties": {"review_status": {"const": "reviewed"}}},
      "then": {"required": ["reason", "insight_decisions"]}},
     {"if": {"properties": {"review_status": {"const": "unavailable"}}},
-     "then": {"required": ["source_url", "reason"], "not": {"required": ["analysis"]}}}
-  ]
+     "then": {"required": ["source_url", "reason"], "not": {"required": ["analysis"]}}},
+    {"if": {"required": ["capture_id"], "properties": {"review_status": {"const": "reviewed"}}},
+     "then": {"required": ["reviewed_thread_ids"],
+              "properties": {"insight_decisions": {"items": {"required": ["subject", "claim", "comment_ids"]}}}}}
+  ],
+  "$defs": {
+    "assembled": {
+      "title": "Assembled review with observed metadata imported from capture evidence",
+      "allOf": [
+        {"$ref": "#"},
+        {"if": {"required": ["capture_id"], "properties": {"review_status": {"const": "reviewed"}}},
+         "then": {"required": ["source_url", "collection", "analysis", "insight_ids", "thread_manifest"]}}
+      ]
+    }
+  }
 }

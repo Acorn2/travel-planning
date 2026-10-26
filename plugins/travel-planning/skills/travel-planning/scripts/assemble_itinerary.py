@@ -737,8 +737,10 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
         )
     except ValueError as error:
         raise AssemblyError(str(error)) from error
-    if (manifest_path.exists() and read_json(manifest_path).get("xhs_comment_research_version") == 1) or planning["xhs_comment_reviews"]:
-        planning["xhs_comment_research_version"] = 1
+    comment_version = read_json(manifest_path).get("xhs_comment_research_version", 0) if manifest_path.exists() else 0
+    if comment_version in {1, 2} or planning["xhs_comment_reviews"]:
+        planning["xhs_comment_research_version"] = max(comment_version, 2 if any(
+            r.get("capture_id") for r in planning["xhs_comment_reviews"]) else 1)
     try:
         planning["xhs_search_records"] = research_evidence.xhs_search_contract.records(workspace)
     except ValueError as error:
@@ -786,6 +788,7 @@ def main() -> int:
         payload = assemble(workspace, plan_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        xhs_comment_contract.record_plan_input(workspace, plan_path, payload, output)
     print(output)
     return 0
 

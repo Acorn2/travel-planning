@@ -140,7 +140,7 @@ python3 skills/travel-planning/scripts/research_workspace.py merge \
 
 `community_evidence[]` 至少包含目标实体、社区来源、主题、洞察、`checked_at`、支持/冲突数量、`community_confidence`、`needs_official_recheck` 和 `source_ids[]`。它兼容小红书 `comment_insights[]` 的 `claim/confidence` 字段，但提交时规范化为 `insight/community_confidence`。社区置信度最高为 `medium`；单条证据或存在冲突时为 `low`。同一实体和主题的不同洞察不会静默覆盖：先按来源权威等级，再按 `checked_at` 选择当前值，双方值写入 `global_state.community_evidence_conflicts[]`。开放、营业、价格、预约、交通和安全相关主题必须标记官方复核。
 
-小红书详情自动将评论数量、读取范围、候选洞察和有限讨论摘录存入 `evidence/<task-id>/xhs-comments/`；不是临时执行缓存。主 Agent 按[评论研究闭环](xhs-comment-research.md)在计划中写逐帖语义审查与候选决策，装配器自动导入真实统计；采纳或待复核的候选用 `comment_note_id/comment_insight_ids` 绑定社区证据。新工作区启用评论契约版本1，不能只用正文交付。
+小红书详情自动将评论数量、读取范围、候选洞察和有限讨论摘录存入 `evidence/<task-id>/xhs-comments/`；不是临时执行缓存。主 Agent 按[评论研究闭环](xhs-comment-research.md)在计划中写逐帖语义审查与候选决策，装配器自动导入真实统计；采纳或待复核的候选用 `comment_note_id/comment_insight_ids` 绑定社区证据。新工作区启用评论契约版本2，逐帖审查全部已取得线程；规则只提示阅读顺序，不能只用正文或少量讨论摘录交付。新增观察后须重新审查、装配和渲染。
 
 新工作区清单启用 `xhs_detail_sampling_version=1`。双主题开放发现后运行 `xhs-sample`，按 `note_id` 去重并补足每目的地15篇详情，吃/玩各至少5篇；final 审查和渲染从装配的搜索记录与真实评论详情归档验收该配额。旧清单没有此版本时保持兼容，不追补或伪造历史样本。
 

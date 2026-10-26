@@ -117,6 +117,8 @@ def store_search(root: Path, payload: dict[str, Any], task_id: str | None = None
 def _valid_detail_capture(item: Any) -> bool:
     if not isinstance(item, dict) or not item.get("note_id"):
         return False
+    if item.get("capture_purpose") == "diagnostic":
+        return False
     note_id = str(item["note_id"])
     parsed = urlparse(str(item.get("source_url") or ""))
     match = re.fullmatch(r"/(?:explore|discovery/item)/([a-zA-Z0-9_-]+)/?", parsed.path)
@@ -266,6 +268,8 @@ def observation_state(root: Path, *, now: datetime | None = None) -> dict[str, A
                 or not item.get("note_id") or not isinstance(item.get("analysis"), dict)
                 or not isinstance(item.get("collection"), dict) or execution_log.unsafe_payload(item)):
             raise ValueError("小红书详情观察无效或含敏感字段")
+        if item.get("capture_purpose") == "diagnostic":
+            continue
         previous = captures.get(item.get("note_id"))
         if previous is None or execution_log.parse_stamp(item["checked_at"]) > execution_log.parse_stamp(previous["checked_at"]):
             captures[item["note_id"]] = item

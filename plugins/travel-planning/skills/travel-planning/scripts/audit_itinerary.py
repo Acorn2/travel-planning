@@ -278,11 +278,11 @@ def audit_community_evidence(
     }
 
 
-def audit(data: dict[str, Any]) -> dict[str, Any]:
+def audit(data: dict[str, Any], workspace: Path | None = None) -> dict[str, Any]:
     blocking: list[str] = []
     warnings: list[str] = []
     try:
-        render_itinerary.validate_data(data)
+        render_itinerary.validate_data(data, workspace)
     except ValueError as error:
         blocking.append(str(error))
 
@@ -295,7 +295,7 @@ def audit(data: dict[str, Any]) -> dict[str, Any]:
     )
     blocking.extend(community_blocking)
     warnings.extend(community_warnings)
-    comment_blocking, comment_warnings, comment_stats = xhs_comment_contract.audit_reviews(data)
+    comment_blocking, comment_warnings, comment_stats = xhs_comment_contract.audit_reviews(data, workspace)
     blocking.extend(comment_blocking)
     warnings.extend(comment_warnings)
     community_stats["comment_research"] = comment_stats
@@ -590,7 +590,7 @@ def main() -> None:
     workspace = args.workspace or render_itinerary.execution_log.infer_workspace(args.input)
     with render_itinerary.execution_log.measured(workspace, "audit", "audit") as span:
         data = json.loads(args.input.read_text(encoding="utf-8"))
-        result = audit(data)
+        result = audit(data, workspace)
         span["status"] = "success" if result["status"] == "pass" else "failed"
         text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
         if args.output:

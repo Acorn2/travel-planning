@@ -477,7 +477,7 @@ class ResearchSourcesTest(unittest.TestCase):
             now=datetime(2026, 9, 25, tzinfo=timezone.utc),
         )
         self.assertEqual(result["comment_insights"], [])
-        self.assertEqual(result["comment_analysis"]["filtered_count"], 1)
+        self.assertEqual(len(result["review_threads"]), 1)
 
     def test_xhs_comment_insights_prioritize_latest_specific_evidence(self) -> None:
         result = research_sources.build_xhs_comment_insights(
@@ -497,12 +497,9 @@ class ResearchSourcesTest(unittest.TestCase):
             ],
             now=datetime(2026, 9, 25, tzinfo=timezone.utc),
         )
-        self.assertEqual(len(result["comment_insights"]), 1)
-        insight = result["comment_insights"][0]
-        self.assertEqual(insight["claim"].startswith("我9月20日现场"), True)
-        self.assertTrue(insight["latest_evidence_at"].startswith("2026-09-20T"))
-        self.assertEqual(insight["support_count"], 2)
-        self.assertEqual(insight["confidence"], "medium")
+        self.assertEqual(result["comment_insights"], [])
+        self.assertEqual(len(result["review_threads"]), 2)
+        self.assertEqual(result["review_threads"][0]["thread_id"], "new-1")
 
     def test_xhs_comment_insights_mark_conflicting_current_claims(self) -> None:
         result = research_sources.build_xhs_comment_insights(
@@ -522,12 +519,8 @@ class ResearchSourcesTest(unittest.TestCase):
             ],
             now=datetime(2026, 9, 25, tzinfo=timezone.utc),
         )
-        self.assertEqual(len(result["comment_insights"]), 1)
-        insight = result["comment_insights"][0]
-        self.assertEqual(insight["contradiction_count"], 1)
-        self.assertEqual(insight["confidence"], "low")
-        self.assertTrue(insight["needs_official_recheck"])
-        self.assertEqual(len(result["needs_recheck"]), 1)
+        self.assertEqual(result["comment_insights"], [])
+        self.assertEqual({t["thread_id"] for t in result["review_threads"]}, {"need-booking", "no-booking"})
 
     def test_xhs_comment_insights_do_not_count_duplicate_evidence_twice(self) -> None:
         comments = [
@@ -538,7 +531,7 @@ class ResearchSourcesTest(unittest.TestCase):
                 "likes": "20",
             },
             {
-                "comment_id": "copy-2",
+                "comment_id": "copy-1",
                 "content": "我9月20日去的时候东门施工，建议从南门进。",
                 "published_at": "2026-09-21T10:00:00+08:00",
                 "likes": "30",
@@ -549,7 +542,7 @@ class ResearchSourcesTest(unittest.TestCase):
             now=datetime(2026, 9, 25, tzinfo=timezone.utc),
         )
         self.assertEqual(result["comment_analysis"]["duplicate_count"], 1)
-        self.assertEqual(result["comment_insights"][0]["support_count"], 1)
+        self.assertEqual(len(result["review_threads"]), 1)
 
     def test_xhs_search_stops_before_search_when_login_is_required(self) -> None:
         args = Namespace(

@@ -203,6 +203,11 @@ def run_query(args: argparse.Namespace, tool: str, parameters: dict[str, Any], c
 
 
 def command_parameters(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "command", None) == "xhs-detail":
+        return {key: getattr(args, key, default) for key, default in {
+            "note_id": None, "all_comments": True, "include_replies": True, "comment_limit": 20,
+            "reply_limit": 50, "scroll_speed": "normal", "capture_purpose": "research", "diagnostic_reason": None,
+        }.items()}
     excluded = {"handler", "command", "workspace", "task_id", "phase", "refresh", "timeout", "consent_external_data"}
     return {key: value for key, value in vars(args).items() if key not in excluded and not key.startswith("_")}
 
@@ -772,19 +777,6 @@ XHS_COMMENT_TOPIC_RULES = (
     ("安全与风险", r"危险|不安全|小心|落石|打滑|防滑|事故|急救|高反|警察"),
 )
 XHS_COMMENT_DEFAULT_TOPIC = "其他"
-XHS_COMMENT_RECHECK_TOPICS = frozenset(
-    {
-        "开放、施工与搬迁",
-        "预约、购票与检票",
-        "价格",
-        "交通与停车",
-        "排队与拥挤",
-        "天气影响",
-        "老人、儿童与无障碍",
-        "安全与风险",
-        "入口与路线",
-    }
-)
 XHS_COMMENT_ANCHOR_PATTERNS = (
     ("东门", r"东门"),
     ("西门", r"西门"),
@@ -972,11 +964,9 @@ def score_xhs_comment(
 
     penalty = (12 if is_question else 0) + (20 if is_promotion else 0) + (10 if is_generic else 0)
     score = max(0, min(100, relevance + recency + specificity + firsthand + engagement - penalty))
-    eligible = score >= 40 and specificity > 0 and not is_question and not is_promotion and not is_generic
     return {
         "topic": topic,
         "score": score,
-        "eligible": eligible,
         "reasons": reasons,
         "flags": flags,
         "published": published,
@@ -986,313 +976,74 @@ def score_xhs_comment(
     }
 
 
-def _flatten_xhs_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    flattened: list[dict[str, Any]] = []
-    for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        flattened.append(comment)
-        for reply in comment.get("replies") or []:
-            if isinstance(reply, dict):
-                child = dict(reply)
-                child["_parent_comment_id"] = comment.get("comment_id")
-                child["parent_comment_id"] = comment.get("comment_id")
-                child["parent_excerpt"] = xhs_excerpt(comment.get("content"), limit=180)
-                flattened.append(child)
-    return flattened
-
-
-def _xhs_comment_sort_key(
-    item: tuple[dict[str, Any], dict[str, Any]],
-) -> tuple[int, float, float, float]:
-    comment, analysis = item
-    published = analysis.get("published")
-    timestamp = published.timestamp() if isinstance(published, datetime) else 0.0
-    return (
-        int(analysis.get("score", 0)),
-        timestamp,
-        float(analysis.get("likes", 0)),
-        float(analysis.get("reply_count", 0)),
-    )
-
-
-def group_xhs_comment_signals(
-    comments: list[dict[str, Any]],
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Group eligible comments that describe the same concrete signal."""
-    analyzed: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for comment in _flatten_xhs_comments(comments):
-        analysis = score_xhs_comment(comment, now=now)
-        if analysis["eligible"]:
-            analyzed.append((comment, analysis))
-    analyzed.sort(key=_xhs_comment_sort_key, reverse=True)
-
-    groups: list[dict[str, Any]] = []
-    for comment, analysis in analyzed:
-        anchors = set(analysis["anchors"])
-        normalized_text = re.sub(r"\W+", "", _xhs_comment_text(comment)).lower()
-        selected: dict[str, Any] | None = None
-        for group in groups:
-            if group["topic"] != analysis["topic"]:
-                continue
-            if anchors and anchors.intersection(group["anchors"]):
-                selected = group
-                break
-            if normalized_text and normalized_text == group["normalized_text"]:
-                selected = group
-                break
-        if selected is None:
-            selected = {
-                "group_id": f"comment-group-{len(groups) + 1}",
-                "topic": analysis["topic"],
-                "anchors": set(anchors),
-                "normalized_text": normalized_text,
-                "content_signatures": set(),
-                "comments": [],
-            }
-            groups.append(selected)
-        analysis = dict(analysis)
-        analysis["duplicate"] = normalized_text in selected["content_signatures"]
-        selected["content_signatures"].add(normalized_text)
-        selected["comments"].append((comment, analysis))
-        selected["anchors"].update(anchors)
-    return groups
-
-
-def _xhs_contains_any(text: str, patterns: tuple[str, ...]) -> bool:
-    if isinstance(patterns, str):
-        patterns = (patterns,)
-    return any(re.search(pattern, text) for pattern in patterns)
-
-
-def _xhs_numbers_with_unit(text: str) -> list[float]:
-    values: list[float] = []
-    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(分钟|小时|元|块|公里|km|万)?", text, re.IGNORECASE):
-        value = float(match.group(1))
-        if match.group(2) in {"小时"}:
-            value *= 60
-        elif match.group(2) in {"公里", "km"}:
-            value *= 1000
-        values.append(value)
-    return values
-
-
-def _xhs_conflict_reason(topic: str, left: str, right: str) -> str | None:
-    positive = {
-        "开放": (r"开放|正常进|恢复|可以进|能进|已通行"),
-        "需要预约": (r"需要预约|必须预约|要预约|建议预约"),
-        "拥挤": (r"排队|拥挤|人多|很挤|等了"),
-        "贵": (r"贵|涨价|不便宜"),
-    }
-    negative = {
-        "开放": (r"关闭|封闭|施工|不能进|不让进|封路"),
-        "需要预约": (r"无需预约|不用预约|不需要预约|免预约"),
-        "拥挤": (r"不排队|人少|空旷|不用等"),
-        "贵": (r"便宜|免费|不贵"),
-    }
-    if topic == "开放、施工与搬迁":
-        if (_xhs_contains_any(left, positive["开放"]) and _xhs_contains_any(right, negative["开放"])) or (
-            _xhs_contains_any(right, positive["开放"]) and _xhs_contains_any(left, negative["开放"])
-        ):
-            return "同一主题同时出现开放与关闭/施工表述"
-    if topic == "预约、购票与检票":
-        if (_xhs_contains_any(left, positive["需要预约"]) and _xhs_contains_any(right, negative["需要预约"])) or (
-            _xhs_contains_any(right, positive["需要预约"]) and _xhs_contains_any(left, negative["需要预约"])
-        ):
-            return "同一主题同时出现需要预约与无需预约表述"
-    if topic == "排队与拥挤":
-        if (_xhs_contains_any(left, positive["拥挤"]) and _xhs_contains_any(right, negative["拥挤"])) or (
-            _xhs_contains_any(right, positive["拥挤"]) and _xhs_contains_any(left, negative["拥挤"])
-        ):
-            return "同一主题同时出现拥挤与不拥挤表述"
-    if topic == "价格":
-        left_values = _xhs_numbers_with_unit(left)
-        right_values = _xhs_numbers_with_unit(right)
-        if left_values and right_values:
-            left_value = max(left_values)
-            right_value = max(right_values)
-            if max(left_value, right_value) and abs(left_value - right_value) / max(left_value, right_value) >= 0.2:
-                return "同一主题出现明显不同的价格或费用"
-    if topic == "入口与路线":
-        left_entries = set(re.findall(r"[东南西北]门", left))
-        right_entries = set(re.findall(r"[东南西北]门", right))
-        recommendation = r"建议|最好|从.+进|从.+走|优先"
-        if left_entries and right_entries and left_entries.isdisjoint(right_entries):
-            if re.search(recommendation, left) and re.search(recommendation, right):
-                return "同一主题出现不同入口或路线建议"
-    return None
-
-
-def detect_xhs_comment_conflicts(
-    groups: list[dict[str, Any]],
-    comments: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Find explicit or material disagreements between grouped signals."""
-    conflicts: list[dict[str, Any]] = []
-    for group in groups:
-        for index, (left_comment, _) in enumerate(group["comments"]):
-            for right_comment, _ in group["comments"][index + 1 :]:
-                reason = _xhs_conflict_reason(
-                    group["topic"],
-                    _xhs_comment_text(left_comment),
-                    _xhs_comment_text(right_comment),
-                )
-                if reason:
-                    conflicts.append(
-                        {
-                            "topic": group["topic"],
-                            "left_group_id": group["group_id"],
-                            "right_group_id": group["group_id"],
-                            "reason": reason,
-                        }
-                    )
-    for index, left_group in enumerate(groups):
-        left_texts = [_xhs_comment_text(comment) for comment, _ in left_group["comments"]]
-        left_text = " ".join(left_texts)
-        for right_group in groups[index + 1 :]:
-            if left_group["topic"] != right_group["topic"]:
-                continue
-            right_text = " ".join(
-                _xhs_comment_text(comment) for comment, _ in right_group["comments"]
-            )
-            reason = _xhs_conflict_reason(left_group["topic"], left_text, right_text)
-            if reason:
-                conflicts.append(
-                    {
-                        "topic": left_group["topic"],
-                        "left_group_id": left_group["group_id"],
-                        "right_group_id": right_group["group_id"],
-                        "reason": reason,
-                    }
-                )
-    return conflicts
-
-
 def build_xhs_comment_insights(
-    comments: list[dict[str, Any]],
-    now: datetime | None = None,
+    comments: list[dict[str, Any]], now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Build the compact evidence layer consumed by travel planning."""
-    flattened = _flatten_xhs_comments(comments)
-    groups = group_xhs_comment_signals(comments, now=now)
-    conflicts = detect_xhs_comment_conflicts(groups, comments=flattened)
-    conflict_counts: dict[str, int] = {}
-    for conflict in conflicts:
-        for group_id in {conflict["left_group_id"], conflict["right_group_id"]}:
-            conflict_counts[group_id] = conflict_counts.get(group_id, 0) + 1
-
-    insights: list[dict[str, Any]] = []
-    duplicate_count = 0
-    for group in groups:
-        duplicate_count += sum(
-            bool(analysis.get("duplicate"))
-            for _, analysis in group["comments"]
-        )
-        ranked = sorted(
-            (
-                (comment, analysis)
-                for comment, analysis in group["comments"]
-                if not analysis.get("duplicate")
-            ),
-            key=_xhs_comment_sort_key,
-            reverse=True,
-        )
-        if not ranked:
-            continue
-        best_comment, best_analysis = ranked[0]
-        conflict_count = conflict_counts.get(group["group_id"], 0)
-        needs_recheck = group["topic"] in XHS_COMMENT_RECHECK_TOPICS or conflict_count > 0
-        if conflict_count:
-            confidence = "low"
-            recheck_reason = "评论存在相互冲突的表述"
-        elif len(ranked) >= 2:
-            confidence = "medium"
-            recheck_reason = "社区评论只能提供近期体验信号"
+    """Prepare every bounded thread for semantic review; scores only order reading."""
+    threads = []
+    manifest = []
+    normalized = []
+    seen = set()
+    filtered = duplicates = total = replies = 0
+    for index, original in enumerate(comments):
+        root = dict(original)
+        root["comment_id"] = str(root.get("comment_id") or "local-" + execution_log.fingerprint(
+            {"position": index, "content": root.get("content")})[:20])
+        children = []
+        for reply_index, original_reply in enumerate(root.get("replies") or []):
+            reply = dict(original_reply)
+            reply["comment_id"] = str(reply.get("comment_id") or "local-" + execution_log.fingerprint(
+                {"parent": root["comment_id"], "position": reply_index, "content": reply.get("content")})[:20])
+            reply.update(parent_comment_id=root["comment_id"], parent_excerpt=xhs_excerpt(root.get("content"), 180))
+            children.append(reply)
+        root["replies"] = children
+        normalized.append(root)
+        members = [{k: v for k, v in root.items() if k != "replies"}, *children]
+        identities = []
+        priority = 0
+        for member in members:
+            total += 1
+            replies += bool(member.get("parent_comment_id"))
+            identity = (root["comment_id"], member["comment_id"])
+            duplicate = identity in seen
+            seen.add(identity)
+            skip = "duplicate" if duplicate else "empty" if not _xhs_comment_text(member) else None
+            filtered += bool(skip)
+            duplicates += duplicate
+            if not duplicate:
+                identities.append({"comment_id": member["comment_id"],
+                    "parent_comment_id": member.get("parent_comment_id"),
+                    "content_digest": execution_log.fingerprint({"content": member.get("content"),
+                        "published_at": member.get("published_at")})})
+            hint = score_xhs_comment(member, now=now)
+            priority = max(priority, hint["score"])
+            member["reading_hint"] = {"score": hint["score"], "topic": hint["topic"], "flags": hint["flags"]}
+            if skip:
+                member["mechanical_skip"] = skip
+        # A repeated root is the same discussion, never a second independent signal.
+        previous = next((t for t in threads if t["thread_id"] == root["comment_id"]), None)
+        if previous:
+            previous["comments"].extend(m for m in members if m.get("mechanical_skip") != "duplicate")
+            next(m for m in manifest if m["thread_id"] == root["comment_id"])["comment_refs"].extend(identities)
         else:
-            confidence = "low"
-            recheck_reason = "只有单条合格评论支持"
-        evidence = [
-            {
-                "comment_id": comment.get("comment_id"),
-                "author": comment.get("author"),
-                "published_at": comment.get("published_at"),
-                "likes": comment.get("likes"),
-                "reply_count": comment.get("reply_count"),
-                "value_score": analysis["score"],
-                "excerpt": xhs_excerpt(_xhs_comment_text(comment), limit=180),
-                "parent_comment_id": comment.get("parent_comment_id"),
-                "parent_excerpt": comment.get("parent_excerpt"),
-            }
-            for comment, analysis in ranked[:5]
-        ]
-        published_dates = [
-            analysis["published"]
-            for _, analysis in ranked
-            if isinstance(analysis.get("published"), datetime)
-        ]
-        latest = max(published_dates).isoformat(timespec="seconds") if published_dates else None
-        insights.append(
-            {
-                "insight_id": group["group_id"],
-                "topic": group["topic"],
-                "claim": _xhs_comment_text(best_comment),
-                "latest_evidence_at": latest,
-                "support_count": len(ranked),
-                "contradiction_count": conflict_count,
-                "confidence": confidence,
-                "needs_official_recheck": needs_recheck,
-                "recheck_reason": recheck_reason if needs_recheck else None,
-                "evidence": evidence,
-            }
-        )
-
-    insights.sort(
-        key=lambda insight: (
-            insight["confidence"] == "medium",
-            insight["support_count"],
-            insight["latest_evidence_at"] or "",
-        ),
-        reverse=True,
-    )
-    needs_recheck = [
-        {
-            "insight_id": insight["insight_id"],
-            "topic": insight["topic"],
-            "claim": insight["claim"],
-            "reason": insight["recheck_reason"],
-        }
-        for insight in insights
-        if insight["needs_official_recheck"]
-    ]
-    eligible_count = sum(
-        1
-        for group in groups
-        for _, analysis in group["comments"]
-        if not analysis.get("duplicate")
-    )
+            threads.append({"thread_id": root["comment_id"], "reading_priority": priority, "comments": members})
+            manifest.append({"thread_id": root["comment_id"], "comment_refs": identities})
+    threads.sort(key=lambda t: t["reading_priority"], reverse=True)
     return {
-        "comment_insights": insights,
+        "normalized_comments": normalized,
+        "review_threads": threads, "thread_manifest": manifest,
+        "comment_insights": [], "needs_recheck": [],
         "discussion_samples": [
-            {"comment_id": comment.get("comment_id"),
-             "excerpt": xhs_excerpt(_xhs_comment_text(comment), limit=180),
-             "parent_comment_id": comment.get("parent_comment_id"),
-             "parent_excerpt": comment.get("parent_excerpt"),
-             "published_at": comment.get("published_at")}
-            for comment in sorted(flattened, key=lambda c: (
-                bool(c.get("parent_comment_id")), score_xhs_comment(c, now=now)["score"]
-            ), reverse=True)[:20]
-        ],
-        "needs_recheck": needs_recheck,
+            {"comment_id": c["comment_id"], "excerpt": xhs_excerpt(c.get("content"), 180),
+             "parent_comment_id": c.get("parent_comment_id"), "parent_excerpt": c.get("parent_excerpt")}
+            for t in threads for c in t["comments"]
+        ][:20],
         "comment_analysis": {
-            "input_count": len(flattened),
-            "top_level_count": len(comments),
-            "reply_count": len(flattened) - len(comments),
-            "eligible_count": eligible_count,
-            "filtered_count": len(flattened) - eligible_count,
-            "duplicate_count": duplicate_count,
-            "group_count": len(insights),
-            "scoring": "相关性30% + 时效性25% + 具体程度20% + 亲历信号15% + 互动10%；互动不代表真实性",
+            "method": "thread_semantic_v2", "input_count": total,
+            "top_level_count": len(comments), "reply_count": replies,
+            "eligible_count": total - filtered, "filtered_count": filtered,
+            "duplicate_count": duplicates, "group_count": 0,
+            "scoring": "分数只提示阅读顺序；eligible_count 是待语义判断样本数，不代表有价值或可信",
         },
     }
 
@@ -1354,7 +1105,13 @@ def search_xhs_with_recovery(args: argparse.Namespace, arguments: dict[str, Any]
 def xhs_state(args: argparse.Namespace) -> dict[str, Any]:
     try:
         root = execution_log.workspace_root(args.workspace)
-        return xhs_search_contract.observation_state(root)
+        state = xhs_search_contract.observation_state(root)
+        if (execution_log.read_json(root / "manifest.json") or {}).get("xhs_comment_research_version") == 2:
+            plan = xhs_comment_contract.current_plan(root) or {}
+            reviews = xhs_comment_contract.load_reviews(root, (plan.get("planning") or {}).get("xhs_comment_reviews") or [])
+            progress = xhs_comment_contract.review_progress(reviews)
+            state["comment_review"] = {**progress, "next_action": "xhs-review" if progress["pending_note_ids"] else None}
+        return state
     except ValueError as error:
         raise SourceError(str(error)) from error
 
@@ -1428,6 +1185,8 @@ def xhs_search(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "capture_purpose", "research") == "diagnostic" and not str(getattr(args, "diagnostic_reason", "") or "").strip():
+        raise SourceError("诊断抓取必须用 --diagnostic-reason 说明用途，不计入正式研究")
     require_xhs_login(query_args=args)
     cached = read_xhs_mcp_token_cache().get("notes", {}).get(args.note_id)
     if not cached or not cached.get("xsec_token"):
@@ -1498,7 +1257,11 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
             },
             "source_url": cached.get("source_url"),
         },
-        "comments": comments,
+        "comments": comment_insights["normalized_comments"],
+        "review_threads": comment_insights["review_threads"],
+        "thread_manifest": comment_insights["thread_manifest"],
+        "capture_purpose": getattr(args, "capture_purpose", "research"),
+        "diagnostic_reason": getattr(args, "diagnostic_reason", None),
         "comment_insights": comment_insights["comment_insights"],
         "discussion_samples": comment_insights["discussion_samples"],
         "needs_recheck": comment_insights["needs_recheck"],
@@ -1521,7 +1284,7 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
             "limitations": ["数量上限是加载目标，不保证取得全部评论；保留实际返回数量",
                              "回复数超过阈值的讨论串可能未展开；不能据此推断不存在争议"],
         },
-        "checked_at": checked_at(),
+        "checked_at": datetime.now().astimezone().isoformat(timespec="microseconds"),
         "disclaimer": "评论及回复为有限样本；规则洞察只是候选，须阅读讨论上下文并记录采纳或排除理由。完整评论区和临时令牌不归档，关键事实需官方复核。",
     }
 
@@ -1542,8 +1305,19 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
     reused_detail_reads = 0
     stopped_reason = None
     stopped_failure_kind = None
+    manifest = execution_log.read_json(root / "manifest.json") or {}
+    review_between_reads = manifest.get("xhs_comment_research_version") == 2
+    awaiting_review = False
+    review_progress = None
     while True:
         progress = xhs_search_contract.sampling_progress(root, destination)
+        if review_between_reads:
+            plan = xhs_comment_contract.current_plan(root) or {}
+            reviews = xhs_comment_contract.load_reviews(root, (plan.get("planning") or {}).get("xhs_comment_reviews") or [])
+            review_progress = xhs_comment_contract.review_progress(reviews)
+            if review_progress["pending_note_ids"]:
+                awaiting_review = True
+                break
         if progress["complete"]:
             break
 
@@ -1555,6 +1329,10 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
             break
 
         available = progress["remaining_candidate_ids_by_scope"]
+        if review_progress:
+            unavailable_ids = {r["note_id"] for r in review_progress["unavailable_notes"]}
+            available = {scope: [note_id for note_id in note_ids if note_id not in unavailable_ids]
+                         for scope, note_ids in available.items()}
         deficits = progress["deficit_by_scope"]
         exhausted_scopes = [scope for scope in ("eat", "play") if deficits[scope] > 0 and not available[scope]]
         if exhausted_scopes:
@@ -1593,8 +1371,7 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
             run_query(
                 detail_args,
                 "xhs-detail",
-                {"note_id": note_id, "all_comments": True, "include_replies": True,
-                 "comment_limit": 20, "reply_limit": 50, "scroll_speed": "normal"},
+                command_parameters(detail_args),
                 read_detail,
                 "xiaohongshu",
                 prove_health=True,
@@ -1616,14 +1393,24 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
     report = {key: value for key, value in final_progress.items()
               if key not in {"remaining_candidate_ids_by_scope", "latest_search_by_scope"}}
     report.update({
-        "status": "complete" if final_progress["complete"] else "incomplete",
+        "status": "awaiting_review" if awaiting_review else "complete" if final_progress["complete"] else "incomplete",
+        "next_action": "xhs-review" if awaiting_review else None,
         "processed_this_run": processed_this_run,
         "fresh_detail_reads_this_run": fresh_detail_reads,
         "reused_detail_reads_this_run": reused_detail_reads,
         "stopped_reason": stopped_reason,
         "failure_kind": stopped_failure_kind,
+        **({"comment_review": review_progress} if review_progress is not None else {}),
     })
     return report
+
+
+def xhs_review(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        return xhs_comment_contract.review_packet(execution_log.workspace_root(args.workspace),
+            getattr(args, "note_id", None), args.offset, args.limit)
+    except ValueError as error:
+        raise SourceError(str(error)) from error
 
 
 def xhs_images(args: argparse.Namespace) -> dict[str, Any]:
@@ -2620,6 +2407,13 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--destination", help="单个目的地；省略时使用工作区 brief.destination")
     command.set_defaults(handler=xhs_sample)
 
+    command = subparsers.add_parser("xhs-review", help="只读本地待审查讨论串，保留问题与回复上下文，不请求上游")
+    command.add_argument("--workspace", required=True)
+    command.add_argument("--note-id", help="省略时读取第一篇未完成审查的正式研究笔记")
+    command.add_argument("--offset", type=int, default=0, choices=range(0, 10000))
+    command.add_argument("--limit", type=int, default=5, choices=range(1, 11))
+    command.set_defaults(handler=xhs_review)
+
     for name in ("xhs-search", "xhs-discover"):
         command = subparsers.add_parser(name, help="小红书开放发现与可追溯补查")
         command.add_argument("--destination", required=name == "xhs-discover", help="单个目的地名称，不带天数")
@@ -2678,6 +2472,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="normal",
         help="扩展评论模式下的滚动速度",
     )
+    command.add_argument("--capture-purpose", choices=["research", "diagnostic"], default="research")
+    command.add_argument("--diagnostic-reason", help="诊断抓取的具体原因；不计入正式研究")
     command.set_defaults(handler=xhs_detail)
 
     command = subparsers.add_parser("xhs-images", help="临时准备已读笔记的1至3张图片，供看图提取信息")
@@ -2823,7 +2619,7 @@ def build_parser() -> argparse.ArgumentParser:
             query_parser.add_argument("--task-id", help="记录调用所属任务；非报价查询可省略")
         query_parser.add_argument("--phase", type=execution_log.identifier,
                                   help="调用所属研究阶段；省略时按命令类型分类")
-        if name not in {"xhs-health", "xhs-images", "xhs-login-status", "xhs-state", "xhs-sample"}:
+        if name not in {"xhs-health", "xhs-images", "xhs-login-status", "xhs-state", "xhs-sample", "xhs-review"}:
             query_parser.add_argument("--refresh", action="store_true", help="忽略本次工作区的有效复用记录，重新请求")
     return parser
 
@@ -2849,7 +2645,7 @@ def main() -> int:
                                     "xiaohongshu", reuse_key=health_key("xiaohongshu"))
             else:
                 payload = args.handler(args)
-            if args.command == "xhs-sample" and payload.get("status") != "complete":
+            if args.command == "xhs-sample" and payload.get("status") not in {"complete", "awaiting_review"}:
                 command_span["status"] = "failed"
             if args.command == "preflight" and payload.get("status") == "unavailable":
                 command_span["status"] = "failed"
@@ -2858,7 +2654,7 @@ def main() -> int:
         output(payload)
         if args.command == "preflight" and payload.get("status") == "unavailable":
             return 2
-        if args.command == "xhs-sample" and payload.get("status") != "complete":
+        if args.command == "xhs-sample" and payload.get("status") not in {"complete", "awaiting_review"}:
             return 2
         return 0
     except AdapterError as error:

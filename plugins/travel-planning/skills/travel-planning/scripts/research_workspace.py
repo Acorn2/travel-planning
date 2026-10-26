@@ -372,7 +372,7 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
         "workspace_version": WORKSPACE_VERSION,
         "research_contract_version": 1,
         "query_design_version": 1,
-        "xhs_comment_research_version": 1,
+        "xhs_comment_research_version": 2,
         "xhs_search_design_version": 1,
         "xhs_detail_sampling_version": 1,
         "trip_id": trip_id,

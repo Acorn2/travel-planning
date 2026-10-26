@@ -140,7 +140,7 @@
             "$ref": "community-evidence.schema.json"
           }
         },
-        "xhs_comment_research_version": {"const": 1},
+        "xhs_comment_research_version": {"enum": [1, 2]},
         "xhs_search_design_version": {"const": 1},
         "xhs_detail_sampling_version": {"const": 1},
         "xhs_search_records": {

@@ -1319,7 +1319,7 @@ def food_walk_lines(event: dict[str, Any]) -> list[str]:
     ]
 
 
-def validate_data(data: dict[str, Any]) -> None:
+def validate_data(data: dict[str, Any], workspace: Path | None = None) -> None:
     """校验研究数据与最终日程之间的引用关系。"""
     trip, days = data.get("trip") or {}, data.get("days") or []
     if not trip.get("title") or not days:
@@ -1337,7 +1337,7 @@ def validate_data(data: dict[str, Any]) -> None:
     evidence_blocking, _ = research_evidence.audit_research(data)
     if evidence_blocking:
         raise ValueError("；".join(evidence_blocking))
-    comment_blocking, _, _ = xhs_comment_contract.audit_reviews(data)
+    comment_blocking, _, _ = xhs_comment_contract.audit_reviews(data, workspace)
     if comment_blocking:
         raise ValueError("；".join(comment_blocking))
     if workflow.get("phase") == "final" and not workflow.get("selected_route_id"):
@@ -2641,14 +2641,16 @@ def render_portable_guide(data: dict[str, Any]) -> str:
       <p class="portable-footnote">资料核验时间：{esc(trip.get("updated_at") or "未注明")}。报价、班次、开放与预约须在出发前复核；规划信息不代表已预订。</p></section>'''
 
 
-def build(data: dict[str, Any], visuals: dict[str, Any] | None = None) -> str:
+def build(data: dict[str, Any], visuals: dict[str, Any] | None = None, workspace: Path | None = None) -> str:
     visuals, artwork_library = prepare_artwork(visuals or {})
-    validate_data(data)
+    validate_data(data, workspace)
     frontend_css = load_frontend_asset("itinerary-app.css", "style")
     frontend_js = load_frontend_asset("itinerary-app.js", "script")
     frontend_notices = (FRONTEND_ASSET_ROOT.parent / "THIRD-PARTY-NOTICES.txt").read_text(encoding="utf-8")
     trip, days = data.get("trip") or {}, data.get("days") or []
     planning = data.get("planning") or {}
+    review_marker = (f'<meta name="xhs-review-digest" content="{xhs_comment_contract.review_digest(data)}">'
+                     if planning.get("xhs_comment_research_version") == 2 else "")
     attractions = {str(x.get("id")): x for x in planning.get("attractions") or [] if x.get("id")}
     routes = {str(x.get("id")): x for x in [*(planning.get("transport_edges") or []), *(planning.get("intercity_options") or [])] if x.get("id")}
     meals = {str(x.get("id")): x for x in planning.get("meal_options") or [] if x.get("id")}
@@ -2695,7 +2697,7 @@ def build(data: dict[str, Any], visuals: dict[str, Any] | None = None) -> str:
         ] if value
     )
     cover = render_visual(visuals.get("cover") or first_event_visual(days), "hero-cover-media", eager=True)
-    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(trip.get("title"))}</title>
+    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(trip.get("title"))}</title>{review_marker}
 <style>
 :root{{--yellow:#ffd92f;--ink:#20201d;--muted:#6f706b;--line:#e7e5de;--paper:#fff;--wash:#f6f5f0;--accent:#ff6b35;--shadow:0 8px 26px rgba(40,38,25,.09)}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--wash);color:var(--ink);font:15px/1.6 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}a{{color:inherit}}button{{font:inherit}}.hero{{position:sticky;top:0;z-index:20;background:var(--yellow);box-shadow:0 2px 14px rgba(60,52,0,.12)}}.hero-inner{{max-width:980px;margin:auto;padding:18px 24px 0}}.kicker{{font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}}h1{{font-size:clamp(25px,5vw,42px);line-height:1.08;margin:6px 0 7px}}.trip-subtitle{{margin:0;font-weight:650}}.meta{{margin:5px 0 14px;font-size:13px;color:#554b00}}.tabs{{display:flex;gap:8px;overflow:auto;padding:0 0 12px;scrollbar-width:none}}.tabs::-webkit-scrollbar{{display:none}}.day-tab{{min-width:112px;border:0;border-radius:13px;padding:9px 12px;background:rgba(255,255,255,.52);text-align:left;cursor:pointer;color:#574e0c}}.day-tab strong,.day-tab span{{display:block}}.day-tab span{{font-size:11px;opacity:.75}}.day-tab.active{{background:#24231f;color:#fff}}main{{max-width:840px;margin:28px auto;padding:0 22px 80px}}.overview,.sources{{background:#fff;border-radius:18px;padding:20px 22px;box-shadow:var(--shadow);margin-bottom:24px}}.overview h2,.sources h2{{font-size:17px;margin:0 0 8px}}.assumption-list{{margin:0;padding-left:20px;color:var(--muted)}}.day{{scroll-margin-top:170px;margin-bottom:42px}}.day-heading{{display:flex;align-items:end;justify-content:space-between;gap:20px;margin:0 0 14px 106px}}.day-heading h2{{margin:2px 0 0;font-size:24px;line-height:1.2}}.day-heading p{{margin:0;color:var(--muted);text-align:right}}.day-weather,.day-cost{{text-align:left!important;font-size:12px;margin-top:4px!important}}.day-weather{{color:#35627c!important}}.day-cost{{color:#8a521f!important}}.eyebrow{{font-size:12px;color:var(--accent);font-weight:800;letter-spacing:.08em}}.event{{display:grid;grid-template-columns:82px 24px 1fr;align-items:stretch}}.time{{padding:22px 12px 0 0;text-align:right;font-variant-numeric:tabular-nums}}.time strong{{display:block}}.end-time{{display:block;font-size:11px;color:var(--muted)}}.rail{{position:relative;display:flex;justify-content:center}}.rail:before{{content:"";position:absolute;width:2px;background:var(--line);top:0;bottom:0}}.dot{{position:relative;z-index:1;margin-top:22px;width:25px;height:25px;border:2px solid #fff;border-radius:50%;display:grid;place-items:center;background:#24231f;color:#fff;font-size:11px;box-shadow:0 0 0 2px var(--line)}}.card{{background:var(--paper);border-radius:18px;padding:18px;margin:0 0 14px 13px;box-shadow:var(--shadow);min-width:0}}.card-top{{display:flex;justify-content:space-between;gap:12px;align-items:center}}.type-label{{font-size:11px;font-weight:800;color:var(--accent);letter-spacing:.08em}}.map-link{{font-size:12px;color:#5c5d58;text-decoration:none}}.card h3{{font-size:19px;line-height:1.25;margin:8px 0 3px}}.subtitle{{color:var(--muted);margin:0 0 12px}}.image-strip{{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:6px;margin:13px 0;overflow:hidden;border-radius:12px;background:#ecebe6;min-height:150px}}.image-strip img{{width:100%;height:150px;object-fit:cover}}.event-facts{{margin:13px 0 0;border-top:1px solid var(--line);padding-top:9px}}.event-facts>div{{display:grid;grid-template-columns:92px 1fr;gap:10px;padding:4px 0}}.event-facts dt{{font-weight:750;font-size:12px}}.event-facts dd{{margin:0;color:#565752;font-size:13px}}.route-handoff{{margin-top:13px;border:1px solid #d7e4dc;background:#f7fbf8;border-radius:13px;padding:14px;display:grid;gap:5px}}.route-handoff-label{{font-size:11px;color:#557364;font-weight:800}}.route-destination-name{{font-size:16px;line-height:1.35;overflow-wrap:anywhere}}.route-destination-address{{font-size:12px;color:#53615a;overflow-wrap:anywhere}}.route-handoff-actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px}}.route-copy,.route-destination-link{{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:7px 12px;border:1px solid #167743;border-radius:9px;background:#fff;color:#126536;text-decoration:none;font-size:12px;font-weight:750;cursor:pointer}}.route-destination-link{{background:#167743;color:#fff}}.route-copy-status{{font-size:11px;color:#126536}}.route-handoff small{{font-size:11px;color:#66706b}}.cost-breakdown{{margin-top:13px;border:1px solid #eadfb2;background:#fffdf4;border-radius:12px;padding:11px 12px}}.cost-breakdown h4{{margin:0 0 6px;font-size:13px}}.cost-breakdown ul{{list-style:none;margin:0;padding:0}}.cost-row{{display:flex;justify-content:space-between;gap:12px;border-top:1px dashed #ded6b6;padding:7px 0}}.cost-row span,.cost-summary{{display:block;color:var(--muted);font-size:11px;margin:0}}.cost-value{{text-align:right;white-space:nowrap}}.cost-summary{{border-top:1px solid #ded6b6;padding-top:7px;color:#72511a;font-weight:700}}.event-notes{{margin-top:13px;border-top:1px solid var(--line);padding-top:9px}}.event-notes section+section{{margin-top:10px}}.event-notes h4{{margin:0;font-size:13px}}.actions{{display:flex;gap:7px;flex-wrap:wrap;margin-top:11px}}.action-link{{display:inline-flex;align-items:center;min-height:44px;border:0;padding:7px 10px;border-radius:9px;background:#24231f;color:#fff;text-decoration:none;font-size:12px;font-weight:700;cursor:pointer}}.action-link:hover{{background:#000}}.action-link-wechat{{background:#168347}}.wechat-account-status{{align-self:center;color:#3f6250;font-size:11px}}.detail-list,.tip-list{{padding-left:20px;margin:9px 0;color:#52534f}}.tip-list{{background:#fff8d4;border-radius:10px;padding:9px 12px 9px 30px}}.sources ul{{padding-left:20px;margin:0}}.sources li{{margin:8px 0}}.sources li span{{display:block;color:var(--muted);font-size:12px}}.footer{{text-align:center;color:var(--muted);font-size:12px;padding-top:8px}}:focus-visible{{outline:3px solid #1668dc;outline-offset:3px}}
 /* Dates and times are compact markers in one continuous timeline. */
@@ -2740,7 +2742,7 @@ def main() -> None:
         data = json.loads(args.input.read_text(encoding="utf-8"))
         visuals = load_visual_manifest(args.visuals) if args.visuals else None
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(build(data, visuals), encoding="utf-8")
+        args.output.write_text(build(data, visuals, workspace), encoding="utf-8")
     print(f"已生成：{args.output}")
 
 
