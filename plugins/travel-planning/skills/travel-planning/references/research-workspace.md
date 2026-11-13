@@ -6,6 +6,18 @@
 
 新建 workspace 的 manifest 与 route-context 记录 `query_design_version=1`。逐次查询按[跨渠道搜索设计](search-design.md)及时写入 route-context 的 research_contract，深度研究继续追加并保留到最终计划；实际平台、工具和非敏感参数可追溯，不用任务摘要替代查询日志。装配器拒绝新工作区删除该版本门槛；旧 workspace 不自动升级为已完成新研究。
 
+新建时默认 `xhs_research_mode=optional`；用户明确要求必须使用小红书时，init 传 `--xhs-mode required`。安装、登录及预检状态不决定模式。optional 未在最终来源、社区证据或餐厅口碑中引用小红书时不执行15篇门槛；正式引用或 required 模式才执行。显式 xhs-sample 仍按15篇目标采集和报告真实缺口，不能用采样进度替代最终验收结论。
+
+恢复已有行程需改变模式时，由 Agent 在明确需求范围内运行下列命令；用户明确要求的 required 不因工具失败自动取消：
+
+```bash
+python3 skills/travel-planning/scripts/research_workspace.py set-xhs-mode \
+  --workspace ".travel-research/<trip-id>" --mode optional \
+  --reason "说明本次选择及替代研究路径；取消用户的必需要求须有其明确指示"
+```
+
+命令保留所有查询、评论与审查记录，记录模式及变更原因，并启用对应验收契约；随后重新装配、审计和渲染。装配器把工作区模式镜像为 planning.xhs_research_mode，不能在计划或最终 JSON 中单独改写。未记录模式但已有采样版本的旧工作区继续按 required 解释，显式变更后才迁移；没有采样版本的更早数据保持旧兼容。失败后未采用时，计划另写 research_contract.xiaohongshu_fallback_reason；未采用的来源通过 source_ids 排除出最终引用，但私有观察及逐帖审查保留。
+
 本文件只说明 `.travel-research/<trip-id>/` 的目录和命令。它是本次旅行唯一的研究与共享状态目录；何时拆任务、字段所有权、依赖波次与完成门槛见[子 Agent 编排](agent-orchestration.md)。
 
 ## 创建
@@ -59,7 +71,9 @@ python3 skills/travel-planning/scripts/research_workspace.py select-route \
   --route-file "/tmp/selected-route.json"
 ```
 
-深度研究 assignment 只能在 `selected-route.json` 存在后创建。
+新工作区的已确认路线必须含 `cities` 非空数组，按实际游玩顺序列出要研究的目的地城市，例如 `{"id":"route-a","cities":["成都","重庆"]}`。单城路线也写城市名，例如杭州的多个湖岸、寺院片区仍为 `cities=["杭州"]`。仅用于出返程的出发地和纯换乘城市不加入名单；实际游玩这些城市时才列入。`city_order`、逐日片区与交通叙述可另保留，不用于推断城市名单。选择路线时先校验并去重城市，再写入文件；缺少或无效名单不会覆盖原已确认路线。
+
+深度研究 assignment 只能在 `selected-route.json` 存在后创建。小红书正式采样及最终验收使用其中 `cities[]` 的完整名单，即使某城尚未搜索也必须报告缺口。
 
 ## 创建任务
 
@@ -142,7 +156,7 @@ python3 skills/travel-planning/scripts/research_workspace.py merge \
 
 小红书详情自动将评论数量、读取范围、候选洞察和有限讨论摘录存入 `evidence/<task-id>/xhs-comments/`；不是临时执行缓存。主 Agent 按[评论研究闭环](xhs-comment-research.md)在计划中写逐帖语义审查与候选决策，装配器自动导入真实统计；采纳或待复核的候选用 `comment_note_id/comment_insight_ids` 绑定社区证据。新工作区启用评论契约版本2，逐帖审查全部已取得线程；规则只提示阅读顺序，不能只用正文或少量讨论摘录交付。新增观察后须重新审查、装配和渲染。
 
-新工作区清单启用 `xhs_detail_sampling_version=1`。双主题开放发现后运行 `xhs-sample`，按 `note_id` 去重并补足每目的地15篇详情，吃/玩各至少5篇；final 审查和渲染从装配的搜索记录与真实评论详情归档验收该配额。旧清单没有此版本时保持兼容，不追补或伪造历史样本。
+新工作区清单启用 `xhs_detail_sampling_version=1`，但是否要求数量门槛由来源模式与正式引用决定。需要时，逐城双主题开放发现后运行 `xhs-sample`，按已确认路线 cities 顺序补足每城15篇详情、吃/玩各至少5篇；状态保留 required_destinations、by_destination 和单城/整条路线完成状态。装配器把确认城市写入已选 route_proposals 项，final 审查与渲染按同一名单验收；optional 未引用时跳过数量门槛，仍校验搜索记录、降级理由与全部已读评论。配额不适用不能称采样达标，不追补或伪造历史样本。
 
 ## 声明式装配
 

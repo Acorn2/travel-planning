@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -12,6 +13,89 @@ EXECUTION_SPEC = importlib.util.spec_from_file_location("execution_log", Path(__
 assert EXECUTION_SPEC and EXECUTION_SPEC.loader
 execution_log = importlib.util.module_from_spec(EXECUTION_SPEC)
 EXECUTION_SPEC.loader.exec_module(execution_log)
+
+SEARCH_SPEC = importlib.util.spec_from_file_location("xhs_search_contract", Path(__file__).with_name("xhs_search_contract.py"))
+assert SEARCH_SPEC and SEARCH_SPEC.loader
+xhs_search_contract = importlib.util.module_from_spec(SEARCH_SPEC)
+SEARCH_SPEC.loader.exec_module(xhs_search_contract)
+
+TEXT_CONTENT_VERSION = 1
+MAX_PACKET_BYTES = 24000
+
+
+def note_context_digest(payload: dict[str, Any]) -> str:
+    """Bind the full acquired body and safe image metadata without archiving their text."""
+    return execution_log.fingerprint({"note": payload.get("note"), "image_reading": payload.get("image_reading")})
+
+
+def content_manifest(payload: dict[str, Any]) -> dict[str, Any]:
+    body = payload["note"]["description"]
+    images = payload["image_reading"]
+    return {"version": 1, "body_characters": len(body), "body_digest": execution_log.fingerprint(body),
+            "body_missing": images["body_missing"], "image_count": images["image_count"],
+            "image_manifest_digest": images["image_manifest_digest"]}
+
+
+def coverage_complete(ranges: Any, length: int) -> bool:
+    if not isinstance(ranges, list) or any(not isinstance(pair, list) or len(pair) != 2
+            or any(type(n) is not int for n in pair) or not 0 <= pair[0] < pair[1] <= length for pair in ranges):
+        return False
+    end = 0
+    for start, stop in sorted(ranges):
+        if start > end:
+            return False
+        end = max(end, stop)
+    return end == length
+
+
+def content_review_issues(review: dict[str, Any]) -> list[str]:
+    if "content_manifest" not in review:
+        return []  # Legacy observations do not acquire invented reading history.
+    manifest = review["content_manifest"]
+    if (not isinstance(manifest, dict) or type(manifest.get("version")) is not int or manifest["version"] != 1
+            or type(manifest.get("body_characters")) is not int or manifest["body_characters"] < 0
+            or type(manifest.get("image_count")) is not int or manifest["image_count"] < 0
+            or type(manifest.get("body_missing")) is not bool
+            or any(not isinstance(manifest.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", manifest[key])
+                   for key in ("body_digest", "image_manifest_digest"))):
+        return ["正文与图片观察清单无效"]
+    decision = review.get("content_review")
+    if not isinstance(decision, dict) or not nonempty_text(decision.get("reason")):
+        return ["正文与图片尚未审查，须记录 content_review 覆盖和结论"]
+    issues = []
+    ranges = decision.get("body_ranges")
+    length = manifest["body_characters"]
+    if not coverage_complete(ranges, length) or decision.get("body_digest") != manifest.get("body_digest"):
+        issues.append("正文分页覆盖不完整或摘要不匹配，不能漏读末尾后标记完成")
+    thread_manifest = review.get("thread_manifest")
+    if (not isinstance(thread_manifest, list) or any(not isinstance(thread, dict)
+            or not isinstance(thread.get("comment_refs"), list)
+            or any(not isinstance(ref, dict) or not nonempty_text(ref.get("comment_id"))
+                   for ref in thread["comment_refs"]) for thread in thread_manifest)):
+        return [*issues, "正文与评论覆盖缺少有效线程清单"]
+    refs = [ref for thread in thread_manifest for ref in thread["comment_refs"]]
+    comments = decision.get("comment_ranges")
+    if (not isinstance(comments, dict) or set(comments) != {ref.get("comment_id") for ref in refs}
+            or any(type(ref.get("content_characters")) is not int or ref["content_characters"] < 0
+                or not coverage_complete(comments.get(ref.get("comment_id")), ref["content_characters"]) for ref in refs)):
+        issues.append("评论文本分片尚未全部审查，不能只读线程首段后标记完成")
+    images = decision.get("images")
+    if decision.get("image_manifest_digest") != manifest.get("image_manifest_digest"):
+        issues.append("图片审查未绑定本次图片清单，不能混用其他观察")
+    if (not isinstance(images, list) or any(not isinstance(image, dict) for image in images)
+            or any(type(image.get("image_index")) is not int for image in images)):
+        return [*issues, "逐图审查必须是带原始图片序号的对象数组"]
+    indices = [image["image_index"] for image in images]
+    if len(set(indices)) != len(indices) or set(indices) != set(range(1, manifest["image_count"] + 1)):
+        issues.append("图片尚未逐图审查：每张须有看图结论、不相关理由或真实读取失败原因")
+    for image in images:
+        if (not isinstance(image.get("status"), str) or image["status"] not in {"reviewed", "not_needed", "unavailable"}
+                or not nonempty_text(image.get("reason"))
+                or image.get("status") == "reviewed" and not nonempty_text(image.get("summary"))):
+            issues.append("图片结论缺少有效状态、具体理由或实际看图摘要")
+    if manifest.get("body_missing") and manifest["image_count"] and not any(i.get("status") == "reviewed" for i in images):
+        issues.append("正文缺失的图片笔记尚未实际看图，不能宣称已完成研究")
+    return issues
 
 
 def note_id_from_url(url: Any) -> str | None:
@@ -44,6 +128,11 @@ def store_capture(root: Path, payload: dict[str, Any], task_id: str | None = Non
         if not str(payload.get("diagnostic_reason") or "").strip():
             raise ValueError("诊断抓取必须记录具体原因")
         record["diagnostic_reason"] = payload["diagnostic_reason"]
+    if payload.get("text_content_version") == TEXT_CONTENT_VERSION:
+        record["text_content_version"] = TEXT_CONTENT_VERSION
+        record["note_context_digest"] = note_context_digest(payload)
+    if payload.get("content_review_version") == 1:
+        record["content_manifest"] = content_manifest(payload)
     if payload.get("thread_manifest") is not None:
         record["thread_manifest"] = deepcopy(payload["thread_manifest"])
         record["capture_id"] = execution_log.fingerprint(record)
@@ -90,14 +179,14 @@ def load_reviews(root: Path, decisions: list[dict[str, Any]]) -> list[dict[str, 
         value = {key: deepcopy(record[key]) for key in
                  ("note_id", "source_url", "checked_at", "collection", "analysis", "review_status")}
         value["insight_ids"] = [item["insight_id"] for item in record["comment_insights"]]
-        for key in ("capture_purpose", "diagnostic_reason", "capture_id", "thread_manifest"):
+        for key in ("capture_purpose", "diagnostic_reason", "capture_id", "thread_manifest", "content_manifest"):
             if key in record:
                 value[key] = deepcopy(record[key])
         decision = supplied.pop(note_id, {})
         # A semantic review must be tied to the exact observation it read.
         if (decision.get("checked_at") == record["checked_at"]
                 and (not record.get("capture_id") or decision.get("capture_id") == record["capture_id"])):
-            for key in ("review_status", "reason", "insight_decisions", "reviewed_thread_ids"):
+            for key in ("review_status", "reason", "insight_decisions", "reviewed_thread_ids", "content_review"):
                 if key in decision:
                     value[key] = deepcopy(decision[key])
         if record.get("capture_id"):
@@ -181,11 +270,12 @@ def workspace_issues(data: dict[str, Any], root: Path | None) -> list[str]:
                 or review.get("collection") != capture.get("collection")
                 or review.get("capture_id") != capture.get("capture_id")
                 or review.get("capture_purpose", "research") != capture.get("capture_purpose", "research")
-                or review.get("thread_manifest") != capture.get("thread_manifest")):
+                or review.get("thread_manifest") != capture.get("thread_manifest")
+                or review.get("content_manifest") != capture.get("content_manifest")):
             issues.append(f"小红书笔记 {note_id}：研究证据已更新或未装配，当前产物过期；请完成审查后重新装配")
             stale.add(note_id)
     if current is not None:
-        fields = ("source_url", "checked_at", "review_status", "reason", "insight_ids", "insight_decisions", "reviewed_thread_ids")
+        fields = ("source_url", "checked_at", "review_status", "reason", "insight_ids", "insight_decisions", "reviewed_thread_ids", "content_review")
         for note_id in sorted(set(reviews) | set(current)):
             before, after = reviews.get(note_id), current.get(note_id)
             if note_id in stale or all(r is None or r.get("capture_purpose") == "diagnostic" for r in (before, after)):
@@ -253,6 +343,7 @@ def review_issues(review: dict[str, Any]) -> list[str]:
         issues.append("评论统计数量不闭合")
     if status != "reviewed" or not nonempty_text(review.get("reason")):
         issues.append("评论仍未语义审查，需记录讨论结论或无有效信号的理由")
+    issues.extend(content_review_issues(review))
     semantic = semantic_review(review)
     threads = comment_threads(review)
     if semantic:
@@ -344,6 +435,18 @@ def validate_page_evidence(source: Path, html: str) -> None:
         return
     if not isinstance(data, dict):
         raise ValueError("实际装配输出格式无效，请重新装配行程")
+    manifest = execution_log.read_json(root / "manifest.json") or {}
+    # Legacy sampling-v1 workspaces also resolve to required mode. An explicit
+    # mode controls the policy marker, not whether quota validation runs.
+    blocking, _ = xhs_search_contract.audit_searches(data, root)
+    if blocking:
+        raise ValueError("；".join(blocking))
+    if "xhs_research_mode" in manifest or "xhs_research_mode" in (data.get("planning") or {}):
+        if "xhs_research_mode" in manifest and (data.get("planning") or {}).get("xhs_research_mode") != xhs_search_contract.research_mode(workspace=root):
+            raise ValueError("行程小红书研究模式与工作区模式不一致，请重新装配与渲染")
+        marker = re.search(r'<meta name="xhs-policy-digest" content="([a-f0-9]{64})">', html)
+        if marker is None or marker.group(1) != xhs_search_contract.policy_digest(data):
+            raise ValueError("HTML 的小红书来源模式或引用状态已过期，请重新渲染后交付")
     issues = workspace_issues(data, root)
     if issues:
         raise ValueError("；".join(issues))
@@ -356,8 +459,63 @@ def validate_page_evidence(source: Path, html: str) -> None:
             raise ValueError("；".join(blocking))
 
 
-def review_packet(root: Path, note_id: str | None = None, offset: int = 0, limit: int = 5) -> dict[str, Any]:
+def utf8_prefix(value: str, budget: int) -> str:
+    return value.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+
+
+def thread_page(threads: list[dict[str, Any]], start: tuple[int, int, int], limit: int,
+                budget: int) -> tuple[list[dict[str, Any]], tuple[int, int, int] | None]:
+    ti, ci, char = start
+    if not 0 <= ti <= len(threads) or ti == len(threads) and (ci or char):
+        raise ValueError("评论游标超出本次观察范围")
+    page = []
+    while ti < len(threads) and len(page) < limit:
+        thread = threads[ti]
+        members = thread["comments"]
+        if not 0 <= ci < len(members):
+            raise ValueError("评论游标中的回复位置无效")
+        item = {key: deepcopy(value) for key, value in thread.items() if key != "comments"}
+        item["comments"] = []
+        if ci:
+            item["parent_context"] = {"comment_id": members[0]["comment_id"],
+                                      "excerpt": str(members[0].get("content") or "")[:180]}
+        while ci < len(members):
+            member = deepcopy(members[ci])
+            text = member.get("content") or ""
+            if not 0 <= char <= len(text):
+                raise ValueError("评论游标中的字符偏移无效")
+            overhead = len(json.dumps({key: value for key, value in member.items() if key != "content"}, ensure_ascii=False).encode()) + 120
+            if budget <= overhead and (page or item["comments"]):
+                if item["comments"]:
+                    page.append(item)
+                return page, (ti, ci, char)
+            fragment = utf8_prefix(text[char:], max(4, budget - overhead))
+            if char < len(text) and not fragment:
+                if item["comments"]:
+                    page.append(item)
+                return page, (ti, ci, char)
+            stop = char + len(fragment)
+            member["content"] = fragment if member.get("content") is not None else None
+            member["content_reading"] = {"offset": char, "total_characters": len(text),
+                                         "next_offset": stop if stop < len(text) else None}
+            item["comments"].append(member)
+            budget -= len(fragment.encode("utf-8")) + overhead
+            if stop < len(text):
+                page.append(item)
+                return page, (ti, ci, stop)
+            ci, char = ci + 1, 0
+        page.append(item)
+        ti, ci = ti + 1, 0
+    return page, (ti, ci, char) if ti < len(threads) else None
+
+
+def review_packet(root: Path, note_id: str | None = None, offset: int = 0, limit: int = 5, *,
+                  body_offset: int = 0, body_limit: int = 4000, cursor: str | None = None) -> dict[str, Any]:
     """Read an exact local observation, including expired cache; never silently refetch."""
+    if type(body_offset) is not int or body_offset < 0 or type(body_limit) is not int or not 1 <= body_limit <= 12000:
+        raise ValueError("正文偏移必须为非负整数，每页正文须为1至12000字符")
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 10:
+        raise ValueError("评论线程偏移必须非负，每批1至10串")
     plan = current_plan(root) or {}
     reviews = load_reviews(root, (plan.get("planning") or {}).get("xhs_comment_reviews") or [])
     progress = review_progress(reviews)
@@ -374,8 +532,14 @@ def review_packet(root: Path, note_id: str | None = None, offset: int = 0, limit
         raise ValueError("没有该笔记的评论观察，请先读取 xhs-detail")
     base = {"note_id": note_id, "checked_at": capture["checked_at"], "capture_id": capture.get("capture_id"),
             "collection": capture["collection"], "analysis": capture["analysis"], **progress,
-            "thread_manifest": capture.get("thread_manifest", []), "live_service_checked": False,
+            "thread_count": len(capture.get("thread_manifest", [])), "live_service_checked": False,
             "legacy_comment_insights": capture.get("comment_insights", [])}
+    if capture.get("content_manifest"):
+        base["content_manifest"] = deepcopy(capture["content_manifest"])
+    if capture.get("text_content_version") != TEXT_CONTENT_VERSION:
+        return {**base, "status": "context_unavailable", "text_content_status": "legacy_excerpt",
+                "discussion_samples": capture.get("discussion_samples", []),
+                "notice": "旧观察的正文或评论可能已截断，无法恢复完整文本；摘录仅供参考，请定向重新读取并绑定新观察"}
     for path in sorted((root / "state/execution/cache").glob("*.json")):
         cached = execution_log.read_json(path) or {}
         payload = cached.get("payload") or {}
@@ -387,8 +551,16 @@ def review_packet(root: Path, note_id: str | None = None, offset: int = 0, limit
         if (payload.get("thread_manifest") != capture.get("thread_manifest")
                 or payload.get("comment_analysis") != capture.get("analysis")
                 or payload.get("capture_purpose", "research") != capture.get("capture_purpose", "research")
+                or payload.get("text_content_version") != TEXT_CONTENT_VERSION
+                or note_context_digest(payload) != capture.get("note_context_digest")
                 or execution_log.unsafe_payload(payload)):
             continue
+        note = deepcopy(payload["note"])
+        description = note.get("description")
+        if not isinstance(description, str) or not isinstance(payload.get("image_reading"), dict):
+            continue
+        if body_offset > len(description):
+            raise ValueError("正文偏移超出本观察的全文长度，请沿用 body_reading.next_offset")
         threads = payload.get("review_threads")
         if threads is None:
             if not isinstance(payload.get("comments"), list):
@@ -396,12 +568,38 @@ def review_packet(root: Path, note_id: str | None = None, offset: int = 0, limit
             threads = [{"thread_id": str(c.get("comment_id") or f"legacy-thread-{i}"),
                         "comments": [{k: v for k, v in c.items() if k != "replies"}, *(c.get("replies") or [])]}
                        for i, c in enumerate(payload["comments"])]
-        batch = threads[offset:offset + limit]
-        return {**base, "status": "pending_review", "review_threads": batch, "offset": offset,
-                "next_offset": offset + len(batch) if offset + len(batch) < len(threads) else None,
-                "notice": "阅读本观察的全部线程后才能标记 reviewed；缓存时间不刷新，不代表当前营业或规则"}
-    return {**base, "status": "context_unavailable", "discussion_samples": capture.get("discussion_samples", []),
-            "notice": "原观察的完整有限样本已不可恢复；必要摘录不能冒充全部已读，请定向重新读取并绑定新观察"}
+        start = (offset, 0, 0)
+        if cursor is not None:
+            match = re.fullmatch(r"([a-f0-9]{64}):(\d+):(\d+):(\d+)", cursor)
+            if not match or match[1] != capture.get("capture_id"):
+                raise ValueError("评论游标不属于本次观察，请从新观察开始阅读")
+            start = tuple(int(match[i]) for i in (2, 3, 4))
+        body_budget, comment_budget = 12000, 6500
+        while True:
+            note["description"] = utf8_prefix(description[body_offset:body_offset + body_limit], body_budget)
+            body_end = body_offset + len(note["description"])
+            batch, following = thread_page(threads, start, limit, comment_budget)
+            next_cursor = ":".join(map(str, (capture["capture_id"], *following))) if following else None
+            returned_ids = {member["comment_id"] for thread in batch for member in thread["comments"]}
+            manifest = [{**thread, "comment_refs": [ref for ref in thread["comment_refs"] if ref["comment_id"] in returned_ids]}
+                        for thread in capture.get("thread_manifest", []) if any(t["thread_id"] == thread["thread_id"] for t in batch)]
+            packet = {**base, "status": "pending_review", "text_content_status": "complete", "note": note,
+                "image_reading": deepcopy(payload["image_reading"]), "thread_manifest": manifest,
+                "body_reading": {"offset": body_offset, "limit": body_limit, "total_characters": len(description),
+                    "returned_characters": len(note["description"]), "next_offset": body_end if body_end < len(description) else None},
+                "review_threads": batch, "offset": start[0], "next_cursor": next_cursor,
+                "next_offset": following[0] if following and following[1:] == (0, 0) else None,
+                "notice": "正文沿 body_reading.next_offset，评论优先沿 next_cursor（--cursor）读完所有片段；next_offset 仅兼容完整线程分页。按片段记录覆盖范围，必要图片实际查看后填 content_review。complete 仅表示缓存文本完整，不证明已读；查询时间不刷新。"}
+            # Match the CLI's pretty-printed representation, including its newline.
+            if len(json.dumps(packet, ensure_ascii=False, indent=2).encode("utf-8")) + 1 <= MAX_PACKET_BYTES:
+                return packet
+            if min(body_budget, comment_budget) <= 64:
+                raise ValueError("观察元数据过大，无法安全分批返回；请检查本地观察格式")
+            body_budget //= 2
+            comment_budget //= 2
+    return {**base, "status": "context_unavailable", "text_content_status": "unavailable",
+            "discussion_samples": capture.get("discussion_samples", []),
+            "notice": "原观察的完整正文、图片提示或有限评论样本已不可恢复；必要摘录不能冒充全部已读，请定向重新读取并绑定新观察"}
 
 
 def audit_reviews(data: dict[str, Any], root: Path | None = None) -> tuple[list[str], list[str], dict[str, int]]:
@@ -453,6 +651,12 @@ def audit_reviews(data: dict[str, Any], root: Path | None = None) -> tuple[list[
                 stats["unavailable_note_count"] += 1
                 warnings.append(f"小红书笔记 {note_id} 评论未取得，不能声称已完成评论研究")
             else:
+                content = review.get("content_review") or {}
+                if isinstance(content, dict):
+                    images = content.get("images")
+                    for image in images if isinstance(images, list) else []:
+                        if isinstance(image, dict) and image.get("status") == "unavailable":
+                            warnings.append(f"小红书笔记 {note_id} 第{image.get('image_index')}图未读取：{image.get('reason') or '未说明原因'}")
                 analysis = review.get("analysis") or {}
                 if (isinstance(analysis, dict) and all(type(analysis.get(k)) is int and analysis[k] >= 0 for k in ANALYSIS_FIELDS)
                         and analysis["input_count"] == analysis["top_level_count"] + analysis["reply_count"]

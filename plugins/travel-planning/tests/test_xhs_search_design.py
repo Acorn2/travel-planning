@@ -65,7 +65,8 @@ class XhsSearchDesignTest(unittest.TestCase):
             contract.validate_search(args)
         path = self.root / "sources/main.jsonl"
         path.parent.mkdir()
-        path.write_text(json.dumps({"id": "food-origin", "summary": "已读发现资料提到鱼豆吉"}) + '\n')
+        path.write_text(json.dumps({"id": "food-origin", "url": "https://fixture.invalid/original-note",
+                                    "summary": "已读发现资料提到鱼豆吉"}) + '\n')
         with self.assertRaisesRegex(ValueError, "缺少.*开放发现"):
             contract.validate_search(args)
         self.query()
@@ -184,6 +185,7 @@ class XhsSearchDesignTest(unittest.TestCase):
         now = datetime.now(timezone.utc)
         s.execution_log.write_json(self.root / "manifest.json", {
             "workspace_version": 1, "xhs_detail_sampling_version": 1})
+        s.execution_log.write_json(self.root / "selected-route.json", {"id": "chosen", "cities": ["宜昌"]})
         self.observation("success", now - timedelta(seconds=10))
         s.execution_log.write_json(self.root / "evidence/main/xhs-comments/note.json", {
             "schema_version": "travel-xhs-comment-review/v1", "note_id": "note0",

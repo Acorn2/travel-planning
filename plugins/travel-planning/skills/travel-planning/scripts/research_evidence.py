@@ -561,9 +561,9 @@ def audit_query_design(contract: dict[str, Any], sources: dict[str, dict[str, An
     return blocking
 
 
-def audit_research(data: dict[str, Any]) -> tuple[list[str], list[str]]:
+def audit_research(data: dict[str, Any], workspace: Path | None = None) -> tuple[list[str], list[str]]:
     planning = data.get("planning") or {}
-    search_blocking, search_warnings = xhs_search_contract.audit_searches(data)
+    search_blocking, search_warnings = xhs_search_contract.audit_searches(data, workspace)
     contract = planning.get("research_contract")
     if contract is None:
         if planning.get("restaurant_research_version") == 4:
@@ -583,8 +583,11 @@ def audit_research(data: dict[str, Any]) -> tuple[list[str], list[str]]:
     if len(sources) != len(data.get("sources") or []):
         blocking.append("来源 ID 不能重复")
     capabilities = contract.get("capabilities") or {}
-    if any(capabilities.get(k) not in {"ready", "unavailable"} for k in ("web_search", "xiaohongshu", "amap")):
+    if (any(capabilities.get(k) not in {"ready", "unavailable"} for k in ("web_search", "amap"))
+            or capabilities.get("xiaohongshu") not in {"ready", "unavailable", "not_requested"}):
         blocking.append("须分别记录网页搜索、小红书、高德的实际能力状态")
+    if capabilities.get("xiaohongshu") == "not_requested" and xhs_search_contract.xhs_is_cited(data):
+        blocking.append("小红书标记为未请求，但行程引用了其来源或评论依据")
     queries = contract.get("queries") or []
     blocking.extend(audit_query_design(contract, sources))
     web_queries = [q for q in queries if q.get("channel") == "web_search"]
@@ -602,7 +605,17 @@ def audit_research(data: dict[str, Any]) -> tuple[list[str], list[str]]:
             blocking.append(str(error))
         if q.get("status") != "success" and not q.get("reason"):
             blocking.append("失败或无结果的查询必须说明原因")
-        if q.get("status") == "success" and not q.get("source_ids") and (contract.get("query_design_version") != 1 or q.get("stage") != "discovery"):
+        # A read-and-rejected XHS detail is still a real query. Its captured
+        # observation is independent of the final, adopted source catalog.
+        parameters = q.get("parameters") or {}
+        observed_id = (parameters.get("feed_id") or parameters.get("note_id")) if isinstance(parameters, dict) else None
+        observed_detail = (q.get("channel") == "mcp" and q.get("provider") == "xiaohongshu"
+            and q.get("stage") == "detail" and q.get("tool") in {"get_feed_detail", "xhs-detail"}
+            and isinstance(q.get("outcome"), str) and bool(q["outcome"].strip())
+            and any(r.get("note_id") == observed_id and xhs_search_contract._valid_detail_capture(r)
+                    for r in planning.get("xhs_comment_reviews") or [] if isinstance(r, dict)))
+        if (q.get("status") == "success" and not q.get("source_ids") and not observed_detail
+                and (contract.get("query_design_version") != 1 or q.get("stage") != "discovery")):
             blocking.append("成功研究查询必须引用实际读过的来源")
         if not isinstance(q.get("source_ids", []), list):
             blocking.append("研究查询 source_ids 必须是数组")

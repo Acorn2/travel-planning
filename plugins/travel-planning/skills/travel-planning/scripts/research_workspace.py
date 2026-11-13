@@ -343,6 +343,9 @@ def workspace_path(value: str) -> Path:
 
 def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
     trip_id = valid_id(args.trip_id, "trip_id")
+    xhs_mode = getattr(args, "xhs_mode", "optional")
+    if not isinstance(xhs_mode, str) or xhs_mode not in research_evidence.xhs_search_contract.RESEARCH_MODES:
+        raise WorkspaceError("小红书研究模式必须为 optional 或 required")
     root = Path(args.root).expanduser().resolve()
     workspace = root / trip_id
     if workspace.exists() and not workspace.is_dir():
@@ -375,6 +378,7 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
         "xhs_comment_research_version": 2,
         "xhs_search_design_version": 1,
         "xhs_detail_sampling_version": 1,
+        "xhs_research_mode": xhs_mode,
         "trip_id": trip_id,
         "created_at": now(),
         "phase": "route_proposal",
@@ -406,14 +410,32 @@ def select_route(args: argparse.Namespace) -> dict[str, Any]:
     route = read_json(Path(args.route_file).expanduser().resolve())
     if not isinstance(route, dict) or not route.get("id"):
         raise WorkspaceError("已选路线必须是包含 id 的 JSON 对象")
+    manifest = read_json(workspace / "manifest.json")
+    if manifest.get("xhs_detail_sampling_version") == 1:
+        try:
+            route["cities"] = research_evidence.xhs_search_contract.route_cities(route)
+        except ValueError as error:
+            raise WorkspaceError(str(error)) from error
     route["selected_at"] = route.get("selected_at") or now()
     write_json(workspace / "selected-route.json", route)
-    manifest = read_json(workspace / "manifest.json")
     manifest["phase"] = "confirmed_planning"
     manifest["selected_route_id"] = route["id"]
     manifest["updated_at"] = now()
     write_json(workspace / "manifest.json", manifest)
     return {"status": "selected", "workspace": str(workspace), "route_id": route["id"]}
+
+
+def set_xhs_mode(args: argparse.Namespace) -> dict[str, Any]:
+    workspace = workspace_path(args.workspace)
+    if (not isinstance(args.mode, str) or args.mode not in research_evidence.xhs_search_contract.RESEARCH_MODES
+            or not isinstance(args.reason, str) or not args.reason.strip()):
+        raise WorkspaceError("变更小红书研究模式须提供 optional/required 和具体原因")
+    manifest = read_json(workspace / "manifest.json")
+    manifest.update(xhs_research_mode=args.mode, xhs_mode_reason=args.reason.strip(),
+                    xhs_detail_sampling_version=1, xhs_search_design_version=1, updated_at=now())
+    write_json(workspace / "manifest.json", manifest)
+    return {"status": "updated", "xhs_research_mode": args.mode, "requires_reassembly": True,
+            "notice": "已保留全部搜索与评论观察；模式变更后重新装配、审计并渲染。正式引用小红书仍须完成配额。"}
 
 
 def assign(args: argparse.Namespace) -> dict[str, Any]:
@@ -1708,7 +1730,15 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--preferences", action="append")
     command.add_argument("--constraints", action="append")
     command.add_argument("--brief-file")
+    command.add_argument("--xhs-mode", choices=sorted(research_evidence.xhs_search_contract.RESEARCH_MODES), default="optional",
+                         help="小红书默认可选；required 表示必须达到逐城15篇配额")
     command.set_defaults(handler=init_workspace)
+
+    command = subparsers.add_parser("set-xhs-mode", help="按明确需求变更本次小红书研究模式，保留观察并要求重新装配")
+    command.add_argument("--workspace", required=True)
+    command.add_argument("--mode", choices=sorted(research_evidence.xhs_search_contract.RESEARCH_MODES), required=True)
+    command.add_argument("--reason", required=True)
+    command.set_defaults(handler=set_xhs_mode)
 
     command = subparsers.add_parser("select-route", help="保存用户已确认的路线")
     command.add_argument("--workspace", required=True)

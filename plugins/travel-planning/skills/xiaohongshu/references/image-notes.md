@@ -9,14 +9,16 @@
 ```bash
 python3 skills/travel-planning/scripts/research_sources.py xhs-search --keyword "宜昌小吃" --note-type image --limit 3
 python3 skills/travel-planning/scripts/research_sources.py xhs-detail --note-id <搜索所得ID>
-python3 skills/travel-planning/scripts/research_sources.py xhs-images --note-id <同一ID> --indices 1 2 3
+python3 skills/travel-planning/scripts/research_sources.py xhs-images --note-id <同一ID> --indices 1 2 3 --expected-digest <image_manifest_digest>
 ```
 
-`xhs-detail` 沿用已缓存的访问令牌，一次读取正文、评论与图片列表；输出 `image_reading.image_count/image_indices/body_missing/status`。空正文不代表图片已读，无图片时明确返回 `no_images`。
+`xhs-detail` 沿用已缓存的访问令牌，一次读取完整正文、有限评论与图片列表；`note.description` 是完整取得文本，`description_excerpt` 只是预览。输出 `image_reading.image_count/image_indices/body_missing/status`，有图时另提示 `next_action=xhs-images` 和 `requires_view_image=true`。`xhs-sample` 的 `review_packet` 与后续 `xhs-review` 同时提供正文、图片提示和评论，无需为找图片序号重新抓取详情。空正文不代表图片已读，无图片时明确返回 `no_images`。
 
 `xhs-images` 只接受已读取详情的笔记，从私有缓存取临时链接；缓存20分钟内有效，不重复搜索或读取详情。选择存在的序号，每次最多3张，返回 `ready_for_reading` 的 `local_path`。**必须实际调用 `view_image` 查看这些本地文件，才可提取图片内容**；命令不提供 OCR，`text_extracted=false`，不能把成功下载当作成功识别。单张读取失败保留不可用原因，不猜测图片内容，也不反复下载。
 
 默认每篇先看1至3张相关图、每座城市最多6张，不为每餐重复看相同图片。已经得到具体可定位线索时停止；只有影响门店、路线、预算或同行限制的具体缺口才补看并注明原因。详情已有图片内容时复用，不为了执行包装命令重新抓取整篇；原生工具直接返回图像时可直接查看。
+
+新观察的图片清单摘要通过 `image_reading.image_manifest_digest` 返回，准备图片时原样传入 `--expected-digest`；缓存被刷新为另一观察时会拒绝混读。每张图片在逐帖 `content_review.images` 中保存原始序号、实际看图摘要，或不相关/读取失败的具体理由；不得只写“已读评论”就完成图片笔记。完整字段见[正文、图片和评论覆盖](../../travel-planning/references/xhs-comment-research.md#正文图片和评论的覆盖记录)。
 
 ## 提取与归档
 

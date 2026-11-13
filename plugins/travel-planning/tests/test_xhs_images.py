@@ -12,6 +12,47 @@ import xhs_images
 
 
 class XhsImagesTest(unittest.TestCase):
+    def test_sample_review_hands_off_original_image_index_without_refetching_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            runtime = root / "runtime"
+            runtime.mkdir()
+            research_sources.execution_log.write_json(workspace / "manifest.json", {
+                "workspace_version": 1, "xhs_comment_research_version": 2})
+            research_sources.execution_log.write_json(workspace / "brief.json", {"destination": "测试城"})
+            for scope, suffix in (("eat", "美食推荐"), ("play", "旅游推荐")):
+                research_sources.xhs_search_contract.store_search(workspace, {
+                    "search_design": {"destination": "测试城", "scope": scope, "stage": "discovery"},
+                    "query": {"keyword": "测试城" + suffix}, "checked_at": "2026-10-26T10:00:00Z",
+                    "search_status": "success", "returned_count": 1,
+                    "candidate_note_ids": [f"{scope}-0"], "results": []})
+            raw = {"data": {"note": {"noteId": "eat-0", "title": "地址见第2图", "desc": "详情见图",
+                "imageList": [{"urlDefault": f"https://sns-webpic.xhscdn.com/{i}?secret=private"}
+                              for i in range(2)]}, "comments": {"list": [], "hasMore": False}}}
+            args = research_sources.build_parser().parse_args(["xhs-sample", "--workspace", str(workspace)])
+            with patch.object(research_sources, "xhs_mcp_token_cache_path", return_value=runtime / "tokens.json"), \
+                 patch.object(research_sources, "require_xhs_login"), \
+                 patch.object(research_sources, "read_xhs_mcp_token_cache", return_value={"notes": {"eat-0": {
+                     "xsec_token": "private", "source_url": "https://www.xiaohongshu.com/explore/eat-0"}}}), \
+                 patch.object(research_sources, "xhs_mcp_call", return_value=raw) as upstream, \
+                 patch.object(research_sources.time, "sleep"):
+                report = research_sources.xhs_sample(args)
+                packet = report["review_packet"]
+                self.assertEqual(packet["note"]["description"], "详情见图")
+                self.assertEqual(packet["image_reading"]["image_indices"], [1, 2])
+                with patch.object(xhs_images, "fetch_image", return_value=(b"image", "png")) as fetch, \
+                     patch.object(xhs_images.tempfile, "mkdtemp", return_value=str(runtime)):
+                    prepared = research_sources.xhs_images(Namespace(note_id=packet["note_id"], indices=[2]))
+                upstream.assert_called_once()
+                self.assertEqual(fetch.call_args.args[0], "https://sns-webpic.xhscdn.com/1?secret=private")
+                self.assertEqual(prepared["images"][0]["image_index"], 2)
+                self.assertEqual(Path(prepared["images"][0]["local_path"]).read_bytes(), b"image")
+                self.assertFalse(prepared["text_extracted"])
+                self.assertEqual(packet["image_reading"]["status"], "not_read")
+                self.assertNotIn("private", json.dumps(report))
+                self.assertNotIn("xhscdn", json.dumps(report))
+
     def test_empty_body_keeps_images_without_exposing_links(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "tokens.json"

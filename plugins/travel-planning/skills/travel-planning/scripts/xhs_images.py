@@ -21,9 +21,15 @@ def cache_path(root: Path, note_id: str) -> Path:
     return root / "image-cache" / (hashlib.sha256(note_id.encode()).hexdigest() + ".json")
 
 
+def images_digest(images: list) -> str:
+    return hashlib.sha256(json.dumps(images, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def cache_images(root: Path, note_id: str, images: list) -> int:
     """Signed links live only in a private, short-lived runtime cache."""
-    rows = images if isinstance(images, list) else []
+    if not isinstance(images, list) or any(not isinstance(row, dict) for row in images):
+        raise ValueError("图片列表格式无效，不能记为没有图片")
+    rows = images
     path = cache_path(root, note_id)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
@@ -84,7 +90,7 @@ def fetch_image(url: str) -> tuple[bytes, str]:
     return data, extension
 
 
-def prepare_images(root: Path, note_id: str, indices: list[int]) -> dict:
+def prepare_images(root: Path, note_id: str, indices: list[int], expected_digest: str | None = None) -> dict:
     if (not indices or len(indices) > MAX_IMAGES or len(set(indices)) != len(indices)
             or any(type(index) is not int or index < 1 for index in indices)):
         raise ValueError("每次选择1至3个不同的正整数图片序号")
@@ -96,6 +102,8 @@ def prepare_images(root: Path, note_id: str, indices: list[int]) -> dict:
         rows = cached["images"]
     except (OSError, ValueError, KeyError, TypeError):
         raise ValueError("图片链接缓存缺失或已过期，请重新读取该笔记详情") from None
+    if expected_digest is not None and images_digest(rows) != expected_digest:
+        raise ValueError("图片缓存与本次观察不一致，请重新读取详情并绑定新观察，不能混用图片序号")
     if any(index > len(rows) for index in indices):
         raise ValueError("所选图片序号超出笔记图片数量")
     files = []
@@ -119,5 +127,5 @@ def prepare_images(root: Path, note_id: str, indices: list[int]) -> dict:
         files.append(item)
     count = sum(item["status"] == "ready_for_reading" for item in files)
     return {"note_id": note_id, "status": "ready_for_reading" if count == len(files) else "partial" if count else "unavailable",
-            "images": files, "text_extracted": False,
+            "images": files, "image_manifest_digest": images_digest(rows), "text_extracted": False,
             "next_step": "用 view_image 查看 local_path；只归档相关摘要、原帖链接和图片序号，不归档图片或临时路径"}

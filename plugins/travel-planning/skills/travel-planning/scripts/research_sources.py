@@ -42,7 +42,7 @@ from research_workspace import INVENTORY_PRODUCTS_BY_DOMAIN, WorkspaceError, rea
 import execution_log  # noqa: E402
 import xhs_comment_contract  # noqa: E402
 import xhs_search_contract  # noqa: E402
-from xhs_images import cache_images, prepare_images  # noqa: E402
+from xhs_images import cache_images, prepare_images, images_digest  # noqa: E402
 from scripts.providers.amap_mcp import (  # noqa: E402
     command as amap_mcp_command,
     load_config as load_amap_environment,
@@ -679,6 +679,13 @@ def xhs_excerpt(value: Any, limit: int = 320) -> str | None:
     return clean if len(clean) <= limit else clean[:limit].rstrip() + "…"
 
 
+def xhs_text(value: Any) -> str | None:
+    """Keep the acquired text intact; excerpts are only for summaries, never review."""
+    if value is None or isinstance(value, str):
+        return value
+    raise SourceError("小红书正文或评论文本格式变化，不能将解析失败记为空内容")
+
+
 def xhs_first_value(mapping: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if mapping.get(key) not in (None, ""):
@@ -686,18 +693,20 @@ def xhs_first_value(mapping: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def xhs_comment_items(value: Any) -> list[dict[str, Any]]:
+def xhs_comment_items(value: Any, *, kind: str = "评论") -> list[dict[str, Any]]:
+    if value is None:
+        return []  # The upstream uses null for replies that have not been expanded.
     if isinstance(value, list):
         if any(not isinstance(item, dict) for item in value):
-            raise SourceError("小红书评论数组含无效元素，不能静默丢弃")
+            raise SourceError(f"小红书{kind}数组含无效元素，不能静默丢弃")
         return value
-    if not isinstance(value, dict):
-        return []
-    for key in ("list", "comments", "commentList", "comment_list", "items"):
-        items = value.get(key)
-        if isinstance(items, list):
-            return xhs_comment_items(items)
-    return []
+    if isinstance(value, dict):
+        for key in ("list", "comments", "commentList", "comment_list", "items"):
+            if key in value:
+                if not isinstance(value[key], list):
+                    break
+                return xhs_comment_items(value[key], kind=kind)
+    raise SourceError(f"小红书{kind}列表格式变化，不能将解析失败记为0条")
 
 
 def normalize_xhs_comment(
@@ -712,16 +721,15 @@ def normalize_xhs_comment(
     )
     if not isinstance(user, dict):
         user = {}
-    replies = xhs_comment_items(
-        xhs_first_value(comment, "subComments", "sub_comments", "replies", "replyList")
-    )
+    replies = []
+    if include_replies:
+        reply_value = next((comment[key] for key in
+            ("subComments", "sub_comments", "replies", "replyList") if key in comment), None)
+        replies = xhs_comment_items(reply_value, kind="回复")
     normalized = {
         "comment_id": xhs_first_value(comment, "id", "commentId", "comment_id"),
         "author": xhs_first_value(user, "nickname", "nickName", "name"),
-        "content": xhs_excerpt(
-            xhs_first_value(comment, "content", "text", "commentContent"),
-            limit=500,
-        ),
+        "content": xhs_text(xhs_first_value(comment, "content", "text", "commentContent")),
         "published_at": unix_time(
             xhs_first_value(comment, "createTime", "create_time", "time", "timestamp")
         ),
@@ -1012,6 +1020,7 @@ def build_xhs_comment_insights(
             duplicates += duplicate
             if not duplicate:
                 identities.append({"comment_id": member["comment_id"],
+                    "content_characters": len(member.get("content") or ""),
                     "parent_comment_id": member.get("parent_comment_id"),
                     "content_digest": execution_log.fingerprint({"content": member.get("content"),
                         "published_at": member.get("published_at")})})
@@ -1221,7 +1230,9 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise SourceError("xiaohongshu-mcp 详情返回格式无效")
     detail = data.get("data") if isinstance(data.get("data"), dict) else data
-    note = detail.get("note") or {}
+    note = detail.get("note")
+    if not isinstance(note, dict) or not note:
+        raise SourceError("小红书详情缺少有效笔记对象，不能作为成功详情归档")
     user = note.get("user") or {}
     interactions = note.get("interactInfo") or {}
     container = xhs_first_value(detail, "comments", "commentList", "comment_list")
@@ -1234,17 +1245,30 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
     if isinstance(container, dict) and not explicit_empty and not any(isinstance(container.get(k), list) for k in
             ("list", "comments", "commentList", "comment_list", "items")):
         raise SourceError("小红书评论列表格式变化，不能将解析失败记为0条")
-    comments = normalize_xhs_comments(detail, include_replies=include_replies)
+    comments = [] if explicit_empty else normalize_xhs_comments(detail, include_replies=include_replies)
     comment_insights = build_xhs_comment_insights(comments)
     note_id = str(note.get("noteId") or args.note_id)
-    image_count = cache_images(xhs_mcp_token_cache_path().parent, note_id, note.get("imageList") or [])
+    images = note.get("imageList")
+    if images is None:
+        images = []
+    if not isinstance(images, list) or any(not isinstance(row, dict) for row in images):
+        raise SourceError("小红书图片列表格式变化，不能将解析失败记为没有图片")
+    # Validate every supplied text alias, including falsey malformed values.
+    for key in ("desc", "body"):
+        if key in note:
+            xhs_text(note[key])
+    description = xhs_text(note.get("desc") or note.get("body")) or ""
+    image_count = cache_images(xhs_mcp_token_cache_path().parent, note_id, images)
     return {
         "status": "community_reported",
+        "text_content_version": xhs_comment_contract.TEXT_CONTENT_VERSION,
+        "content_review_version": 1,
         "provider": "xpzouying/xiaohongshu-mcp（非官方）",
         "note": {
             "note_id": note.get("noteId") or args.note_id,
             "title": note.get("title"),
-            "description_excerpt": xhs_excerpt(note.get("desc") or note.get("body")),
+            "description": description,
+            "description_excerpt": xhs_excerpt(description),
             "note_type": note.get("type"),
             "published_at": unix_time(note.get("time")),
             "ip_location": note.get("ipLocation"),
@@ -1267,8 +1291,11 @@ def xhs_detail(args: argparse.Namespace) -> dict[str, Any]:
         "needs_recheck": comment_insights["needs_recheck"],
         "comment_analysis": comment_insights["comment_analysis"],
         "image_reading": {"image_count": image_count, "status": "not_read" if image_count else "no_images",
-                          "body_missing": not bool(str(note.get("desc") or note.get("body") or "").strip()),
-                          "image_indices": list(range(1, image_count + 1))},
+                          "body_missing": not bool(description.strip()),
+                          "image_indices": list(range(1, image_count + 1)),
+                          "image_manifest_digest": images_digest(images),
+                          "next_action": "xhs-images" if image_count else None,
+                          "requires_view_image": bool(image_count)},
         "comment_collection": {
             "mode": "expanded" if all_comments else "sampled",
             "top_level_limit": comment_limit if all_comments else 10,
@@ -1293,10 +1320,8 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
     """Sequentially read distinct open-discovery candidates until the quota is met or blocked."""
     try:
         root = execution_log.workspace_root(args.workspace)
-        brief = execution_log.read_json(root / "brief.json") or {}
-        destination = str(getattr(args, "destination", None) or brief.get("destination") or "").strip()
-        if not destination:
-            raise SourceError("小红书详情采样缺少目的地")
+        destination = getattr(args, "destination", None)
+        xhs_search_contract.sampling_progress(root, destination)
     except (WorkspaceError, execution_log.ExecutionError, ValueError) as error:
         raise SourceError(str(error)) from error
 
@@ -1320,6 +1345,9 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
                 break
         if progress["complete"]:
             break
+        if progress["destination_complete"]:
+            stopped_reason = "指定城市采样已达标，但已确认路线中的其他城市仍有缺口；请省略 --destination 继续逐城采样。"
+            break
 
         latest = progress.get("latest_search_by_scope") or {}
         failed_searches = [scope for scope, record in latest.items() if record.get("status") == "failed"]
@@ -1337,7 +1365,7 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
         exhausted_scopes = [scope for scope in ("eat", "play") if deficits[scope] > 0 and not available[scope]]
         if exhausted_scopes:
             stopped_reason = (
-                "以下主题仍有配额缺口但没有未读取候选：" + "/".join(exhausted_scopes)
+                progress["destination"] + " 以下主题仍有配额缺口但没有未读取候选：" + "/".join(exhausted_scopes)
                 + "；请补充对应主题的开放发现搜索后重新运行。"
             )
             stopped_failure_kind = "candidate_exhausted"
@@ -1392,9 +1420,14 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
     final_progress = xhs_search_contract.sampling_progress(root, destination)
     report = {key: value for key, value in final_progress.items()
               if key not in {"remaining_candidate_ids_by_scope", "latest_search_by_scope"}}
+    next_action = None
+    if awaiting_review:
+        next_action = "xhs-review"
+    elif final_progress["destination_complete"] and not final_progress["complete"]:
+        next_action = "xhs-sample"
     report.update({
         "status": "awaiting_review" if awaiting_review else "complete" if final_progress["complete"] else "incomplete",
-        "next_action": "xhs-review" if awaiting_review else None,
+        "next_action": next_action,
         "processed_this_run": processed_this_run,
         "fresh_detail_reads_this_run": fresh_detail_reads,
         "reused_detail_reads_this_run": reused_detail_reads,
@@ -1402,20 +1435,24 @@ def xhs_sample(args: argparse.Namespace) -> dict[str, Any]:
         "failure_kind": stopped_failure_kind,
         **({"comment_review": review_progress} if review_progress is not None else {}),
     })
+    if awaiting_review:
+        report["review_packet"] = xhs_comment_contract.review_packet(root, review_progress["pending_note_ids"][0])
     return report
 
 
 def xhs_review(args: argparse.Namespace) -> dict[str, Any]:
     try:
         return xhs_comment_contract.review_packet(execution_log.workspace_root(args.workspace),
-            getattr(args, "note_id", None), args.offset, args.limit)
+            getattr(args, "note_id", None), args.offset, args.limit,
+            body_offset=args.body_offset, body_limit=args.body_limit, cursor=args.cursor)
     except ValueError as error:
         raise SourceError(str(error)) from error
 
 
 def xhs_images(args: argparse.Namespace) -> dict[str, Any]:
     try:
-        return prepare_images(xhs_mcp_token_cache_path().parent, args.note_id, args.indices)
+        return prepare_images(xhs_mcp_token_cache_path().parent, args.note_id, args.indices,
+                              expected_digest=getattr(args, "expected_digest", None))
     except ValueError as error:
         raise SourceError(str(error)) from None
 
@@ -2404,14 +2441,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("xhs-sample", help="自动去重读取发现候选，直到小红书详情采样配额达标")
     command.add_argument("--workspace", required=True)
-    command.add_argument("--destination", help="单个目的地；省略时使用工作区 brief.destination")
+    command.add_argument("--destination", help="限定已确认路线中的单个城市；省略时按路线顺序补足未达标城市")
     command.set_defaults(handler=xhs_sample)
 
-    command = subparsers.add_parser("xhs-review", help="只读本地待审查讨论串，保留问题与回复上下文，不请求上游")
+    command = subparsers.add_parser("xhs-review", help="本地分批读取正文、图片提示与完整讨论串，不请求上游")
     command.add_argument("--workspace", required=True)
     command.add_argument("--note-id", help="省略时读取第一篇未完成审查的正式研究笔记")
     command.add_argument("--offset", type=int, default=0, choices=range(0, 10000))
     command.add_argument("--limit", type=int, default=5, choices=range(1, 11))
+    command.add_argument("--body-offset", type=int, default=0, help="正文字符偏移，沿用 body_reading.next_offset")
+    command.add_argument("--cursor", help="评论片段游标，原样沿用 next_cursor；包含观察身份")
+    command.add_argument("--body-limit", type=int, default=4000, choices=range(1, 12001), metavar="1..12000", help="每页正文字符数，默认4000")
     command.set_defaults(handler=xhs_review)
 
     for name in ("xhs-search", "xhs-discover"):
@@ -2477,6 +2517,7 @@ def build_parser() -> argparse.ArgumentParser:
     command.set_defaults(handler=xhs_detail)
 
     command = subparsers.add_parser("xhs-images", help="临时准备已读笔记的1至3张图片，供看图提取信息")
+    command.add_argument("--expected-digest", help="原样使用 image_reading.image_manifest_digest，防止混用刷新后的图片")
     command.add_argument("--note-id", required=True)
     command.add_argument("--indices", type=int, nargs="+", required=True, help="图片序号，从1开始；最多3张")
     command.set_defaults(handler=xhs_images)

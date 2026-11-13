@@ -112,6 +112,57 @@ class XhsCommentsTest(unittest.TestCase):
         with self.assertRaises(sources.SourceError):
             self.detail(raw)
 
+    def test_unknown_reply_shapes_fail_instead_of_becoming_zero(self):
+        for field in ("subComments", "sub_comments", "replies", "replyList"):
+            for value in ({"unexpected": []}, {"list": None}, "", "invalid", 0, False, [None]):
+                raw = upstream_response()
+                comment = raw["data"]["comments"]["list"][0]
+                comment.pop("subComments")
+                comment[field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(sources.SourceError, "回复"):
+                    self.detail(raw)
+
+    def test_valid_empty_or_unloaded_replies_preserve_coverage_gap(self):
+        for value in (None, [], {"list": []}):
+            raw = upstream_response()
+            raw["data"]["comments"]["list"][0]["subComments"] = value
+            with self.subTest(value=value):
+                payload, _ = self.detail(raw)
+                self.assertEqual(payload["comment_analysis"]["reply_count"], 0)
+                self.assertEqual(payload["comment_collection"]["unexpanded_reply_threads"], 1)
+        raw["data"]["comments"]["list"][0]["subCommentCount"] = "0"
+        self.assertEqual(self.detail(raw)[0]["comment_collection"]["unexpanded_reply_threads"], 0)
+
+    def test_explicit_no_replies_does_not_parse_unrequested_reply_container(self):
+        raw = upstream_response()
+        raw["data"]["comments"]["list"][0]["subComments"] = {"unknown": []}
+        args = sources.build_parser().parse_args(["xhs-detail", "--note-id", "note1", "--no-replies"])
+        payload, _ = self.detail(raw, args)
+        self.assertFalse(payload["comment_collection"]["include_replies"])
+        self.assertEqual(payload["comment_collection"]["unexpanded_reply_threads"], 1)
+
+    def test_bad_replies_stop_sampling_without_archiving_fake_zero(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sources.execution_log.write_json(root / "manifest.json", {"workspace_version": 1, "xhs_comment_research_version": 2})
+            sources.execution_log.write_json(root / "brief.json", {"destination": "测试城"})
+            for scope, suffix in (("eat", "美食推荐"), ("play", "旅游推荐")):
+                sources.xhs_search_contract.store_search(root, {
+                    "search_design": {"destination": "测试城", "scope": scope, "stage": "discovery"},
+                    "query": {"keyword": "测试城" + suffix}, "checked_at": "2026-10-26T10:00:00Z",
+                    "search_status": "success", "returned_count": 1, "candidate_note_ids": ["note1"], "results": []})
+            raw = upstream_response()
+            raw["data"]["comments"]["list"][0]["subComments"] = {"unexpected": []}
+            with patch.object(sources, "require_xhs_login"), patch.object(sources, "read_xhs_mcp_token_cache", return_value={
+                "notes": {"note1": {"xsec_token": "private", "source_url": "https://www.xiaohongshu.com/explore/note1"}}
+            }), patch.object(sources, "xhs_mcp_call", return_value=raw) as call:
+                report = sources.xhs_sample(sources.build_parser().parse_args(["xhs-sample", "--workspace", str(root)]))
+            self.assertEqual(report["status"], "incomplete")
+            self.assertEqual(report["processed_this_run"], 0)
+            self.assertEqual(report["sampled_total"], 0)
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(list(root.glob("evidence/*/xhs-comments/*.json")), [])
+
     def test_sample_mode_and_hot_thread_threshold_are_explicit(self):
         args = sources.build_parser().parse_args(["xhs-detail", "--note-id", "note1", "--sample-comments"])
         payload, sent = self.detail(args=args)
@@ -200,8 +251,8 @@ class XhsCommentsTest(unittest.TestCase):
         self.assertEqual([c["comment_id"] for c in result["review_threads"][0]["comments"]], ["q", "a"])
         self.assertEqual(result["comment_insights"], [])
 
-    def capture(self, root, *, note_id="note1", checked_at="2026-10-26T10:00:00Z", purpose="research"):
-        payload, _ = self.detail()
+    def capture(self, root, *, note_id="note1", checked_at="2026-10-26T10:00:00Z", purpose="research", raw=None):
+        payload, _ = self.detail(raw)
         payload["note"].update(note_id=note_id, source_url=f"https://www.xiaohongshu.com/explore/{note_id}")
         payload.update(checked_at=checked_at, capture_purpose=purpose, diagnostic_reason="协议诊断" if purpose == "diagnostic" else None)
         contract.store_capture(root, payload)
@@ -210,9 +261,20 @@ class XhsCommentsTest(unittest.TestCase):
         return payload, contract.latest_captures(root)[note_id]
 
     def reviewed(self, capture):
-        return {"note_id": capture["note_id"], "checked_at": capture["checked_at"], "capture_id": capture["capture_id"],
+        decision = {"note_id": capture["note_id"], "checked_at": capture["checked_at"], "capture_id": capture["capture_id"],
                 "review_status": "reviewed", "reason": "所有取得的问答都已阅读，无适用于本次旅行的信息", "insight_decisions": [],
                 "reviewed_thread_ids": [t["thread_id"] for t in capture["thread_manifest"]]}
+        manifest = capture.get("content_manifest")
+        if manifest:
+            decision["content_review"] = {"body_digest": manifest["body_digest"],
+                "image_manifest_digest": manifest["image_manifest_digest"],
+                "body_ranges": [[0, manifest["body_characters"]]] if manifest["body_characters"] else [],
+                "comment_ranges": {ref["comment_id"]: [[0, ref["content_characters"]]] if ref["content_characters"] else []
+                                   for thread in capture["thread_manifest"] for ref in thread["comment_refs"]},
+                "reason": "测试中核读完整正文及图片，无适用于本次行程的新信息",
+                "images": [{"image_index": i, "status": "reviewed", "reason": "测试图片",
+                            "summary": "图中是测试路线与地址"} for i in range(1, manifest["image_count"] + 1)]}
+        return decision
 
     def test_all_reviewed_with_zero_adoptions_passes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -317,6 +379,157 @@ class XhsCommentsTest(unittest.TestCase):
             self.assertEqual(len(next(t for t in all_threads if t["thread_id"] == "c1")["comments"]), 3)
             self.assertIsNone(second["next_offset"])
             upstream.assert_not_called()
+
+    def test_detail_preserves_full_body_comments_and_reply_corrections(self):
+        raw = upstream_response()
+        body = "路线介绍。\n" * 100 + "夜间禁止进入，请改为白天。"
+        comment = "白天游览体验。\n" * 100 + "但是周末南门关闭，请走北门。"
+        reply = "补充说明。\n" * 120 + "我说的是另一家分店，不是正文里的店。"
+        raw["data"]["note"]["desc"] = body
+        raw["data"]["comments"]["list"][0]["content"] = comment
+        raw["data"]["comments"]["list"][0]["subComments"][0]["content"] = reply
+        payload, _ = self.detail(raw)
+        self.assertEqual(payload["note"]["description"], body)
+        self.assertTrue(payload["note"]["description_excerpt"].endswith("…"))
+        self.assertEqual(payload["comments"][0]["content"], comment)
+        self.assertEqual(payload["comments"][0]["replies"][0]["content"], reply)
+        thread = next(t for t in payload["review_threads"] if t["thread_id"] == "c1")
+        self.assertEqual(thread["comments"][0]["content"], comment)
+        self.assertEqual(thread["comments"][1]["content"], reply)
+        self.assertEqual(thread["comments"][1]["parent_comment_id"], "c1")
+
+    def test_review_reads_all_body_pages_with_images_and_complete_threads(self):
+        raw = upstream_response()
+        body = "前半段玩法。\n" * 1000 + "末尾纠正：东门关闭，改走北门。"
+        raw["data"]["note"]["desc"] = body
+        comment = "游玩体验。\n" * 100 + "但是晚上禁止进入。"
+        reply = "位置说明。\n" * 100 + "最后纠正：这里指另一家分店。"
+        raw["data"]["comments"]["list"][0]["content"] = comment
+        raw["data"]["comments"]["list"][0]["subComments"][0]["content"] = reply
+        with tempfile.TemporaryDirectory() as temp, patch.object(sources, "cache_images", return_value=2):
+            root = Path(temp)
+            payload, capture = self.capture(root, raw=raw)
+            with patch.object(sources, "xhs_mcp_call") as upstream:
+                first = contract.review_packet(root, limit=1, body_limit=700)
+                self.assertEqual(first["note"]["title"], raw["data"]["note"]["title"])
+                self.assertEqual(first["image_reading"]["image_indices"], [1, 2])
+                self.assertEqual(first["image_reading"]["next_action"], "xhs-images")
+                self.assertTrue(first["image_reading"]["requires_view_image"])
+                self.assertEqual(first["text_content_status"], "complete")
+                parts = [first["note"]["description"]]
+                packet = first
+                while packet["body_reading"]["next_offset"] is not None:
+                    packet = contract.review_packet(root, limit=1, body_limit=700,
+                        body_offset=packet["body_reading"]["next_offset"])
+                    parts.append(packet["note"]["description"])
+                    self.assertEqual(packet["capture_id"], capture["capture_id"])
+                    self.assertEqual(packet["checked_at"], capture["checked_at"])
+                self.assertEqual("".join(parts), body)
+                self.assertEqual(packet["body_reading"]["total_characters"], len(body))
+                self.assertEqual(first["body_reading"]["offset"], 0)
+                self.assertEqual(first["body_reading"]["returned_characters"], 700)
+                second = contract.review_packet(root, offset=first["next_offset"], limit=1)
+                threads = first["review_threads"] + second["review_threads"]
+                self.assertEqual({t["thread_id"] for t in threads}, {"c1", "c2"})
+                thread = next(t for t in threads if t["thread_id"] == "c1")
+                self.assertEqual(len(thread["comments"]), 3)
+                self.assertEqual(thread["comments"][0]["content"], comment)
+                self.assertEqual(thread["comments"][1]["content"], reply)
+                upstream.assert_not_called()
+            stored = json.dumps(capture, ensure_ascii=False)
+            public = json.dumps(contract.load_reviews(root, [self.reviewed(capture)]), ensure_ascii=False)
+            for value in (stored, public):
+                self.assertNotIn(body, value)
+                self.assertNotIn("末尾纠正", value)
+                self.assertNotIn('"description"', value)
+                self.assertNotIn("但是晚上禁止进入", value)
+                self.assertNotIn("最后纠正", value)
+            self.assertEqual(payload["note"]["description"], body)
+
+    def test_image_only_note_and_empty_discussion_remain_readable(self):
+        raw = upstream_response()
+        raw["data"]["note"]["desc"] = ""
+        raw["data"]["note"]["interactInfo"]["commentCount"] = "0"
+        raw["data"]["comments"] = {"list": [], "hasMore": False}
+        with tempfile.TemporaryDirectory() as temp, patch.object(sources, "cache_images", return_value=2):
+            root = Path(temp)
+            self.capture(root, raw=raw)
+            packet = contract.review_packet(root)
+            self.assertEqual(packet["status"], "pending_review")
+            self.assertEqual(packet["note"]["description"], "")
+            self.assertTrue(packet["image_reading"]["body_missing"])
+            self.assertEqual(packet["image_reading"]["status"], "not_read")
+            self.assertEqual(packet["body_reading"]["total_characters"], 0)
+            self.assertIsNone(packet["body_reading"]["next_offset"])
+            self.assertEqual(packet["review_threads"], [])
+            self.assertNotIn("private-test-token", json.dumps(packet))
+
+    def test_text_only_note_does_not_request_images(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(sources, "cache_images", return_value=0):
+            root = Path(temp)
+            self.capture(root)
+            packet = contract.review_packet(root)
+            self.assertEqual(packet["image_reading"]["status"], "no_images")
+            self.assertIsNone(packet["image_reading"]["next_action"])
+            self.assertFalse(packet["image_reading"]["requires_view_image"])
+            self.assertIsNone(packet["body_reading"]["next_offset"])
+
+    def test_legacy_excerpt_cache_cannot_claim_complete_note_context(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload, _ = self.detail()
+            payload.pop("text_content_version", None)
+            payload.pop("content_review_version", None)
+            payload["note"].pop("description", None)
+            contract.store_capture(root, payload)
+            sources.execution_log.write_json(root / "state/execution/cache/legacy.json", {
+                "payload": payload, "payload_sha256": sources.execution_log.fingerprint(payload)})
+            packet = contract.review_packet(root)
+            self.assertEqual(packet["status"], "context_unavailable")
+            self.assertEqual(packet["text_content_status"], "legacy_excerpt")
+            self.assertIn("截断", packet["notice"])
+            self.assertNotIn("review_threads", packet)
+
+    def test_review_matches_body_and_image_context_to_original_capture(self):
+        for field in ("body", "images"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.capture(root)
+                path = root / "state/execution/cache/fixture-note1.json"
+                cached = json.loads(path.read_text())
+                if field == "body":
+                    cached["payload"]["note"]["description"] = "被替换的正文"
+                else:
+                    cached["payload"]["image_reading"]["image_count"] = 999
+                cached["payload_sha256"] = sources.execution_log.fingerprint(cached["payload"])
+                sources.execution_log.write_json(path, cached)
+                self.assertEqual(contract.review_packet(root)["status"], "context_unavailable")
+
+    def test_review_cli_pages_body_without_requesting_platform(self):
+        raw = upstream_response()
+        raw["data"]["note"]["desc"] = "正文。" * 2000 + "末尾限制。"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sources.execution_log.write_json(root / "manifest.json", {"workspace_version": 1})
+            self.capture(root, raw=raw)
+            argv = ["research_sources.py", "xhs-review", "--workspace", str(root),
+                    "--body-offset", "4000", "--body-limit", "4000", "--limit", "1"]
+            with patch.object(sys, "argv", argv), patch.object(sources, "output") as output, \
+                 patch.object(sources, "xhs_mcp_call") as upstream:
+                self.assertEqual(sources.main(), 0)
+                packet = output.call_args.args[0]
+                self.assertEqual(packet["note"]["description"], raw["data"]["note"]["desc"][4000:8000])
+                self.assertIsNone(packet["body_reading"]["next_offset"])
+                upstream.assert_not_called()
+
+    def test_review_rejects_invalid_body_page_instead_of_silent_empty_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload, _ = self.capture(root)
+            for parameters in ({"body_offset": -1}, {"body_limit": 0}, {"body_limit": 12001},
+                               {"body_offset": len(payload["note"]["description"]) + 1}):
+                with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+                    contract.review_packet(root, **parameters)
 
     def test_changed_semantic_decision_invalidates_assembly_without_refetch(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -436,6 +649,9 @@ class XhsCommentsTest(unittest.TestCase):
                 first = sources.xhs_sample(args)
                 self.assertEqual(first["status"], "awaiting_review")
                 self.assertEqual(read.call_count, 1)
+                self.assertEqual(first["review_packet"]["note"]["description"], payload["note"]["description"])
+                self.assertEqual(first["review_packet"]["image_reading"], payload["image_reading"])
+                self.assertEqual(len(first["review_packet"]["review_threads"]), 2)
                 capture = next(iter(contract.latest_captures(root).values()))
                 sources.execution_log.write_json(root / "state/itinerary-plan.json", {
                     "planning": {"xhs_comment_reviews": [self.reviewed(capture)]}})
@@ -443,6 +659,7 @@ class XhsCommentsTest(unittest.TestCase):
                 self.assertEqual(second["status"], "awaiting_review")
                 self.assertEqual(read.call_count, 2)
                 self.assertEqual(second["sampled_total"], 2)
+                self.assertEqual(second["review_packet"]["note_id"], "eat-1")
                 state = sources.xhs_state(args)
                 self.assertEqual(state["comment_review"]["pending_note_count"], 1)
 
@@ -559,7 +776,10 @@ class XhsCommentsTest(unittest.TestCase):
     def test_documented_review_schema_distinguishes_input_from_assembled_metadata(self):
         schema = json.loads((SCRIPTS.parent / "schemas/xhs-comment-review.schema.json").read_text())
         guide = (SCRIPTS.parent / "references/xhs-comment-research.md").read_text()
-        example = json.loads(re.search(r"```json\n(.*?)\n```", guide, re.S).group(1))
+        examples = [json.loads(value) for value in re.findall(r"```json\n(.*?)\n```", guide, re.S)]
+        example = next(value for value in examples if "note_id" in value)
+        coverage = next(value["content_review"] for value in examples if "content_review" in value)
+        self.assertTrue(set(schema["properties"]["content_review"]["required"]).issubset(coverage))
         self.assertTrue(set(schema["required"]).issubset(example))
         for rule in schema["allOf"]:
             condition = rule["if"]

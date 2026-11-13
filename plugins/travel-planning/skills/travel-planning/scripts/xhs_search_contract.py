@@ -17,6 +17,7 @@ SPEC.loader.exec_module(execution_log)
 SUFFIXES = {"eat": ("美食推荐", "小吃推荐"), "play": ("旅游推荐", "旅游攻略")}
 DETAIL_SAMPLE_TOTAL = 15
 DETAIL_SAMPLE_PER_SCOPE = 5
+RESEARCH_MODES = {"optional", "required"}
 DURATION = re.compile(r"(?:[0-9０-９一二两三四五六七八九十百]+\s*(?:天|日|晚|夜)|[0-9]+\s*[-–~至]\s*[0-9]+\s*(?:天|日)|\b[0-9]+\s*(?:days?|nights?)\b)", re.I)
 
 
@@ -32,6 +33,83 @@ def is_open_keyword(keyword: str, destination: str, scope: str) -> bool:
     return compact in {re.sub(r"\s+", "", destination) + suffix for suffix in SUFFIXES[scope]}
 
 
+def route_cities(route: Any) -> list[str]:
+    """Use explicit destination cities, never infer cities from route prose or searches."""
+    cities = route.get("cities") if isinstance(route, dict) else None
+    if (not isinstance(cities, list) or not cities
+            or any(not isinstance(city, str) or not city.strip() or re.search(r"[、,，;；]", city) for city in cities)):
+        raise ValueError("已确认路线须提供非空 cities 数组，每项为一个目的地城市；不能用 city_order、片区或已搜索城市推断")
+    return list(dict.fromkeys(city.strip() for city in cities))
+
+
+def research_mode(data: dict[str, Any] | None = None, workspace: Path | None = None) -> str:
+    settings = ((execution_log.read_json(workspace / "manifest.json") or {}) if workspace is not None
+                else (data or {}).get("planning") or {})
+    mode = settings.get("xhs_research_mode", "required" if settings.get("xhs_detail_sampling_version") == 1 else "optional")
+    if not isinstance(mode, str) or mode not in RESEARCH_MODES:
+        raise ValueError("小红书研究模式必须为 optional 或 required")
+    return mode
+
+
+def xhs_attribution(item: dict[str, Any]) -> bool:
+    provider = str(item.get("provider") or item.get("platform") or "").casefold()
+    if "xiaohongshu" in provider or "小红书" in provider:
+        return True
+    for key in ("origin_url", "url"):
+        try:
+            host = (urlparse(str(item.get(key) or "")).hostname or "").casefold()
+        except ValueError:
+            continue
+        if any(host == domain or host.endswith("." + domain) for domain in ("xiaohongshu.com", "xhslink.com")):
+            return True
+    return False
+
+
+def xhs_is_cited(data: dict[str, Any]) -> bool:
+    if any(xhs_attribution(item) for item in data.get("sources") or [] if isinstance(item, dict)):
+        return True
+    planning = data.get("planning") or {}
+    if any(item.get("comment_note_id") or xhs_attribution(item)
+           for item in planning.get("community_evidence") or [] if isinstance(item, dict)):
+        return True
+    for snapshot in planning.get("restaurant_snapshots") or []:
+        if not isinstance(snapshot, dict):
+            continue
+        community = snapshot.get("community_consensus") or {}
+        for reference in community.get("references") or []:
+            if isinstance(reference, dict) and xhs_attribution({"platform": community.get("platform"), **reference}):
+                return True
+    return False
+
+
+def quota_required(data: dict[str, Any], workspace: Path | None = None) -> bool:
+    return research_mode(data, workspace) == "required" or xhs_is_cited(data)
+
+
+def policy_digest(data: dict[str, Any]) -> str:
+    planning = data.get("planning") or {}
+    return execution_log.fingerprint({"mode": research_mode(data), "cited": xhs_is_cited(data),
+        "fallback_reason": (planning.get("research_contract") or {}).get("xiaohongshu_fallback_reason")})
+
+
+def required_destinations(root: Path) -> list[str]:
+    manifest = execution_log.read_json(root / "manifest.json") or {}
+    route = execution_log.read_json(root / "selected-route.json")
+    strict = manifest.get("xhs_detail_sampling_version") == 1
+    if route is not None and (strict or isinstance(route, dict) and route.get("cities")):
+        if not isinstance(route, dict) or not route.get("id"):
+            raise ValueError("已确认路线缺少有效 id")
+        if manifest.get("selected_route_id") and route["id"] != manifest["selected_route_id"]:
+            raise ValueError("selected-route.json 与工作区已确认路线 ID 不一致")
+        return route_cities(route)
+    if strict:
+        raise ValueError("缺少已确认路线 selected-route.json；请先确认路线并提供 cities 城市名单，再进行正式采样")
+    destination = (execution_log.read_json(root / "brief.json") or {}).get("destination")
+    if not isinstance(destination, str) or not destination.strip():
+        raise ValueError("小红书详情采样缺少目的地")
+    return [destination.strip()]  # Legacy workspaces have no route-backed sampling contract.
+
+
 def records(root: Path) -> list[dict[str, Any]]:
     items = []
     for path in sorted((root / "evidence").glob("*/xhs-searches/*.json")):
@@ -45,6 +123,19 @@ def records(root: Path) -> list[dict[str, Any]]:
     unique = {item["id"]: item for item in items}
     return sorted(unique.values(), key=lambda item: (
         execution_log.parse_stamp(item["checked_at"]), item.get("observed_at_ns", 0)))
+
+
+def source_catalog(root: Path) -> dict[str, dict[str, Any]]:
+    """Registered research sources include candidates that were later rejected."""
+    catalog = {}
+    for path in sorted((root / "sources").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                item = json.loads(line)
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                    raise ValueError("研究来源目录必须是带 ID 的对象")
+                catalog[item["id"]] = item
+    return catalog
 
 
 def validate_search(args: Any) -> dict[str, Any] | None:
@@ -77,13 +168,14 @@ def validate_search(args: Any) -> dict[str, Any] | None:
         source_id = meta["target_source_id"]
         if not source_id:
             raise ValueError("具体对象补查须用 --target-source-id 引用发现来源，或 --user-request 记录用户指定")
-        source_ids = set()
-        for path in (root / "sources").glob("*.jsonl"):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    source_ids.add(json.loads(line).get("id"))
-        if source_id not in source_ids:
+        catalog = source_catalog(root)
+        if source_id not in catalog:
             raise ValueError("具体对象的发现来源未登记，不能先定答案再补证据")
+        source = catalog[source_id]
+        parsed = urlparse(str(source.get("url") or ""))
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("具体对象的发现来源须有真实 HTTPS 原文链接")
+        meta["target_source"] = {"id": source_id, "url": source["url"]}
         if not any(r.get("scope") == scope and r.get("destination") == destination
                    and r.get("stage") == "discovery" and r.get("status") == "success" for r in records(root)):
             raise ValueError("具体对象补查之前缺少本目的地同主题的成功开放发现")
@@ -201,10 +293,13 @@ def _progress_for_destination(destination: str, searches: list[dict[str, Any]], 
 
 
 def sampling_progress(root: Path, destination: str | None = None) -> dict[str, Any]:
-    brief = execution_log.read_json(root / "brief.json") or {}
-    destination = str(destination or brief.get("destination") or "").strip()
-    if not destination:
-        raise ValueError("小红书详情采样缺少目的地")
+    destinations = required_destinations(root)
+    strict = (execution_log.read_json(root / "manifest.json") or {}).get("xhs_detail_sampling_version") == 1
+    if destination and destination not in destinations:
+        route = execution_log.read_json(root / "selected-route.json")
+        if strict or isinstance(route, dict) and route.get("cities"):
+            raise ValueError("采样城市不在已确认路线 cities 中，不能替换逐城验收名单")
+        destinations = [destination]
     searches = records(root)
     captures: dict[str, dict[str, Any]] = {}
     for path in sorted((root / "evidence").glob("*/xhs-comments/*.json")):
@@ -219,11 +314,18 @@ def sampling_progress(root: Path, destination: str | None = None) -> dict[str, A
         previous = captures.get(note_id)
         if previous is None or execution_log.parse_stamp(item["checked_at"]) > execution_log.parse_stamp(previous["checked_at"]):
             captures[note_id] = item
-    progress = _progress_for_destination(destination, searches, captures)
-    return {"status": "sampling_progress", **progress}
+    all_progress = {city: _progress_for_destination(city, searches, captures) for city in destinations}
+    active = destination or next((city for city, value in all_progress.items() if not value["complete"]), destinations[0])
+    progress = all_progress[active]
+    public = {city: {key: value for key, value in item.items()
+                    if key not in {"remaining_candidate_ids_by_scope", "latest_search_by_scope"}}
+              for city, item in all_progress.items()}
+    return {"status": "sampling_progress", **progress, "destination_complete": progress["complete"],
+            "required_destinations": destinations, "by_destination": public,
+            "complete": all(item["complete"] for item in all_progress.values())}
 
 
-def audit_detail_sample(data: dict[str, Any]) -> list[str]:
+def audit_detail_sample(data: dict[str, Any], workspace: Path | None = None) -> list[str]:
     """Block final v1 itineraries until unique, detail-backed note targets are met."""
     planning = data.get("planning") or {}
     searches = planning.get("xhs_search_records") or []
@@ -232,12 +334,30 @@ def audit_detail_sample(data: dict[str, Any]) -> list[str]:
         return ["小红书详情采样无法验收：xhs_search_records 必须是对象数组"]
     if not isinstance(reviews, list) or any(not isinstance(item, dict) for item in reviews):
         return ["小红书详情采样无法验收：xhs_comment_reviews 必须是对象数组"]
-    destinations = sorted({str(item.get("destination") or "").strip() for item in searches
-                           if item.get("stage") == "discovery" and str(item.get("destination") or "").strip()})
-    if not destinations:
-        return [f"小红书详情采样未达标：缺少目的地开放发现记录；目标为每个目的地独立笔记至少 {DETAIL_SAMPLE_TOTAL} 篇，吃/玩各至少 {DETAIL_SAMPLE_PER_SCOPE} 篇"]
-    captures = {str(item.get("note_id")): item for item in reviews if _valid_detail_capture(item)}
+    selected_id = (data.get("workflow") or {}).get("selected_route_id")
+    proposals = data.get("route_proposals") or []
+    if not isinstance(proposals, list):
+        return ["小红书逐城采样无法验收：route_proposals 必须是数组"]
+    selected = [route for route in proposals if isinstance(route, dict) and selected_id and route.get("id") == selected_id]
     issues = []
+    try:
+        if len(selected) != 1:
+            raise ValueError("缺少唯一匹配 selected_route_id 的已确认路线")
+        destinations = route_cities(selected[0])
+    except ValueError as error:
+        return [f"小红书逐城采样无法验收：{error}"]
+    if workspace is not None:
+        try:
+            current = execution_log.read_json(workspace / "selected-route.json")
+            if not isinstance(current, dict) or current.get("id") != selected_id:
+                raise ValueError("当前工作区已确认路线与行程路线 ID 不一致")
+            actual = route_cities(current)
+        except ValueError as error:
+            return [f"小红书逐城采样无法验收：{error}"]
+        if actual != destinations:
+            issues.append("已确认路线城市名单已变更或未完整装配，请重新装配；当前应研究：" + "、".join(actual))
+        destinations = actual
+    captures = {str(item.get("note_id")): item for item in reviews if _valid_detail_capture(item)}
     for destination in destinations:
         progress = _progress_for_destination(destination, searches, captures)
         if progress["complete"]:
@@ -256,11 +376,17 @@ def observation_state(root: Path, *, now: datetime | None = None) -> dict[str, A
     """Summarize the latest evidence, without presenting history as a live probe."""
     now = now or datetime.now(timezone.utc)
     destination = (execution_log.read_json(root / "brief.json") or {}).get("destination")
+    route_issue = None
+    try:
+        destinations = required_destinations(root)
+    except ValueError as error:
+        destinations = []
+        route_issue = str(error)
     search_records = records(root)
     latest = {}
     for item in search_records:
-        if item.get("destination") == destination and item.get("stage") == "discovery":
-            latest[item.get("scope")] = item
+        if item.get("destination") in destinations and item.get("stage") == "discovery":
+            latest[(item["destination"], item.get("scope"))] = item
     captures = {}
     for path in sorted((root / "evidence").glob("*/xhs-comments/*.json")):
         item = execution_log.read_json(path)
@@ -275,11 +401,15 @@ def observation_state(root: Path, *, now: datetime | None = None) -> dict[str, A
             captures[item["note_id"]] = item
     manifest = execution_log.read_json(root / "manifest.json") or {}
     sampling_enabled = manifest.get("xhs_detail_sampling_version") == 1
-    progress = sampling_progress(root, destination) if sampling_enabled and destination else None
+    mode = research_mode(workspace=root)
+    progress = None
+    if sampling_enabled:
+        progress = (sampling_progress(root) if not route_issue else
+                    {"complete": False, "route_required": True, "required_destinations": [], "reason": route_issue})
     topics = []
-    for scope in SUFFIXES:
-        item = latest.get(scope)
-        value = {"scope": scope, "keyword": discovery_keyword(destination, scope) if destination else None,
+    for city, scope in ((city, scope) for city in destinations for scope in SUFFIXES):
+        item = latest.get((city, scope))
+        value = {"destination": city, "scope": scope, "keyword": discovery_keyword(city, scope),
                  "latest_search": None, "can_reuse_search_result": False, "detail_observations": []}
         if item is None:
             value["next_action"] = "run_discovery"
@@ -294,8 +424,11 @@ def observation_state(root: Path, *, now: datetime | None = None) -> dict[str, A
                 "analysis": captures[note_id]["analysis"], "collection": captures[note_id]["collection"]}
                 for note_id in item.get("candidate_note_ids", []) if note_id in captures]
             if item["status"] == "success":
-                value["next_action"] = "run_xhs_sample" if progress and not progress.get("complete") else (
-                    "review_detail_evidence" if value["detail_observations"] else "read_details_and_comments")
+                city_progress = (progress or {}).get("by_destination", {}).get(city)
+                if city_progress and not city_progress["complete"]:
+                    value["next_action"] = "run_xhs_sample" if mode == "required" else "review_source_usage"
+                else:
+                    value["next_action"] = "review_detail_evidence" if value["detail_observations"] else "read_details_and_comments"
             elif item["status"] == "no_results":
                 value["next_action"] = "review_empty_result" if recent else "refresh_discovery"
             elif item.get("failure_kind") in {"login_required", "verification_required", "quota_exceeded"}:
@@ -305,16 +438,36 @@ def observation_state(root: Path, *, now: datetime | None = None) -> dict[str, A
         topics.append(value)
     return {"status": "observations_only", "generated_at": now.isoformat(), "live_service_checked": False,
             "destination": destination, "topics": topics,
+            "required_destinations": destinations,
+            "xhs_research_mode": mode,
             "detail_sampling": progress,
-            "notice": "历史失败不能证明当前服务不可用；搜索列表、正文与评论分别验收。未调用详情不能说评论读取失败。"}
+            "notice": "数量进度不等于最终交付门槛：optional 模式未引用小红书时无需15篇，正式引用或 required 模式才验收配额。历史失败不能证明当前服务不可用；搜索列表、正文与评论分别验收。未调用详情不能说评论读取失败。"}
 
 
-def audit_searches(data: dict[str, Any]) -> tuple[list[str], list[str]]:
+def audit_searches(data: dict[str, Any], workspace: Path | None = None) -> tuple[list[str], list[str]]:
     planning = data.get("planning") or {}
-    if planning.get("xhs_search_design_version") != 1:
+    manifest = (execution_log.read_json(workspace / "manifest.json") or {}) if workspace is not None else {}
+    mode_declared = "xhs_research_mode" in planning or "xhs_research_mode" in manifest
+    sampling_enabled = (planning.get("xhs_detail_sampling_version") == 1
+                        or manifest.get("xhs_detail_sampling_version") == 1 or mode_declared)
+    if planning.get("xhs_search_design_version") != 1 and not sampling_enabled:
         return [], []
     items = planning.get("xhs_search_records") or []
     issues = []
+    try:
+        mode = research_mode(data, workspace)
+        if "xhs_research_mode" in planning:
+            research_mode(data)
+    except ValueError as error:
+        return [str(error)], []
+    if "xhs_research_mode" in manifest and planning.get("xhs_research_mode") != mode:
+        issues.append("行程小红书研究模式与工作区模式不一致或缺失，请重新装配与渲染")
+    if sampling_enabled and planning.get("xhs_search_design_version") != 1:
+        issues.append("逐城采样必须保留 xhs_search_design_version=1 与实际搜索记录，请重新装配")
+    if manifest.get("xhs_detail_sampling_version") == 1 and planning.get("xhs_detail_sampling_version") != 1:
+        issues.append("新工作区不能删除逐城采样版本以跳过验收，请重新装配")
+    elif mode_declared and planning.get("xhs_detail_sampling_version") != 1:
+        issues.append("声明小红书研究模式时须保留 xhs_detail_sampling_version=1 契约，请重新装配")
     if not isinstance(items, list) or any(not isinstance(r, dict) for r in items):
         return ["xhs_search_records 必须是对象数组"], []
     research_queries = (planning.get("research_contract") or {}).get("queries") or []
@@ -328,6 +481,7 @@ def audit_searches(data: dict[str, Any]) -> tuple[list[str], list[str]]:
                 issues.append("研究契约的小红书关键词缺少对应实际搜索记录")
     seen_open = set()
     source_ids = {s.get("id") for s in data.get("sources") or [] if isinstance(s, dict)}
+    catalog = source_catalog(workspace) if workspace is not None else None
     for item in items:
         destination, scope, keyword = item.get("destination"), item.get("scope"), item.get("keyword")
         if scope not in SUFFIXES or not isinstance(destination, str) or not isinstance(keyword, str):
@@ -342,7 +496,18 @@ def audit_searches(data: dict[str, Any]) -> tuple[list[str], list[str]]:
             elif item.get("status") == "success":
                 seen_open.add((destination, scope))
         elif item.get("stage") == "detail":
-            if not user_request and ((destination, scope) not in seen_open or item.get("target_source_id") not in source_ids):
+            target_id = item.get("target_source_id")
+            target = item.get("target_source")
+            registered = isinstance(target_id, str) and (target_id in source_ids or catalog is not None and target_id in catalog)
+            if isinstance(target, dict):
+                parsed = urlparse(str(target.get("url") or ""))
+                bound = target.get("id") == target_id and parsed.scheme == "https" and bool(parsed.hostname)
+                if catalog is not None:
+                    bound = bound and target_id in catalog and catalog[target_id].get("url") == target.get("url")
+                registered = registered or bound
+                if not bound:
+                    issues.append("具体对象查询的发现来源快照与实际来源不一致")
+            if not user_request and ((destination, scope) not in seen_open or not registered):
                 issues.append("小红书具体对象查询缺少前置开放发现或发现来源")
         else:
             issues.append("小红书搜索阶段无效")
@@ -353,7 +518,20 @@ def audit_searches(data: dict[str, Any]) -> tuple[list[str], list[str]]:
                 or returned != len(ids) or selected < 0 or selected > returned):
                 issues.append("小红书搜索返回数量或候选列表记录不完整")
     if (data.get("workflow") or {}).get("phase") == "final":
-        if planning.get("xhs_detail_sampling_version") == 1:
-            issues.extend(audit_detail_sample(data))
+        if sampling_enabled and quota_required(data, workspace):
+            issues.extend(audit_detail_sample(data, workspace))
+        elif sampling_enabled:
+            research = planning.get("research_contract") or {}
+            unavailable = (research.get("capabilities") or {}).get("xiaohongshu") == "unavailable"
+            failed = any(item.get("status") in {"failed", "no_results"} for item in items)
+            failed = failed or any(xhs_attribution(query) and query.get("status") in {"failed", "no_results"}
+                                   for query in research.get("queries") or [] if isinstance(query, dict))
+            unavailable = unavailable or any(review.get("review_status") == "unavailable"
+                                             for review in planning.get("xhs_comment_reviews") or [] if isinstance(review, dict))
+            if unavailable or failed:
+                reason = research.get("xiaohongshu_fallback_reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    issues.append("小红书不可用或查询失败后未采用，须记录具体降级原因 xiaohongshu_fallback_reason")
+                return issues, ["小红书为可选来源，本次未引用；保留降级原因，其他来源仍须通过研究验收"]
         return issues, []
     return [], issues

@@ -1334,7 +1334,7 @@ def validate_data(data: dict[str, Any], workspace: Path | None = None) -> None:
     if not planning:
         return
     workflow = data.get("workflow") or {}
-    evidence_blocking, _ = research_evidence.audit_research(data)
+    evidence_blocking, _ = research_evidence.audit_research(data, workspace)
     if evidence_blocking:
         raise ValueError("；".join(evidence_blocking))
     comment_blocking, _, _ = xhs_comment_contract.audit_reviews(data, workspace)
@@ -2651,6 +2651,8 @@ def build(data: dict[str, Any], visuals: dict[str, Any] | None = None, workspace
     planning = data.get("planning") or {}
     review_marker = (f'<meta name="xhs-review-digest" content="{xhs_comment_contract.review_digest(data)}">'
                      if planning.get("xhs_comment_research_version") == 2 else "")
+    if "xhs_research_mode" in planning:
+        review_marker += f'<meta name="xhs-policy-digest" content="{research_evidence.xhs_search_contract.policy_digest(data)}">'
     attractions = {str(x.get("id")): x for x in planning.get("attractions") or [] if x.get("id")}
     routes = {str(x.get("id")): x for x in [*(planning.get("transport_edges") or []), *(planning.get("intercity_options") or [])] if x.get("id")}
     meals = {str(x.get("id")): x for x in planning.get("meal_options") or [] if x.get("id")}

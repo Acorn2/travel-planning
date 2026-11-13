@@ -1,3 +1,11 @@
+# 小红书可选来源与条件配额（2026-11-13）
+
+未采用的成功详情查询以真实参数对应的正式抓取观察追踪，不强迫加入最终来源目录；旧采样工作区的 HTML 交付同样执行逐城验收。新观察归档 content_manifest，计划用 content_review 声明正文/评论半开区间覆盖及逐图结论，缺口会进入待审查。阅读包按 UTF-8 JSON 24KB 限制输出，正文字符偏移与绑定 capture_id 的评论片段游标分别续读；仅返回当前片段的评论清单。图片准备校验原观察图片清单摘要，正文/评论/图片未知结构明确失败。
+
+manifest.xhs_research_mode 是本次来源模式的依据，新工作区默认 optional；init 可明确 required，set-xhs-mode 记录变更原因并保留全部观察。装配器镜像到 planning，审计拒绝缺失或不一致。旧采样版本未声明模式时保持 required，不自动改写历史要求。
+
+xhs_search_contract 共用模式与来源引用判断：正式 sources、community_evidence、餐厅口碑引用小红书，或模式为 required 时，按确认路线验收15篇及吃玩各5篇；optional 未引用时只豁免数量门槛。失败降级原因保存在 research_contract，网页/事实证据与全部已读评论审查继续生效。HTML 的 xhs-policy-digest 绑定模式、引用状态和降级原因，分享与快照准备拦截旧 JSON 或旧 HTML；模式变更不构成发布授权。
+
 # 评论语义审查 v2（2026-10-26）
 
 取：Agent 从 xhs-detail 的 review_threads 或只读 xhs-review 取得原观察的有限讨论串，分页保持根评论与回复。新版采样每篇等待语义审查；游客继续从同一行程页面获得经裁决的安排及依据。

@@ -22,6 +22,9 @@
         "xiaohongshu",
         "amap"
       ],
+      "properties": {
+        "xiaohongshu": {"enum": ["ready", "unavailable", "not_requested"]}
+      },
       "additionalProperties": {
         "enum": [
           "ready",
@@ -31,6 +34,10 @@
     },
     "web_unavailable_reason": {
       "type": "string"
+    },
+    "xiaohongshu_fallback_reason": {
+      "type": "string", "minLength": 1,
+      "description": "可选小红书不可用或查询失败后未采用时，记录真实原因和替代研究路径。"
     },
     "queries": {
       "type": "array",
@@ -79,6 +86,7 @@
           },
           "source_ids": {
             "type": "array",
+            "description": "最终采用来源的 ID。小红书成功详情查询若通过实际 feed_id/note_id 绑定正式抓取观察且 outcome 说明排除，可为空；不为追踪未采用笔记强行加入最终来源。",
             "items": {
               "type": "string"
             }

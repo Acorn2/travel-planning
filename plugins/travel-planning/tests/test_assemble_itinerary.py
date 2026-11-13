@@ -93,6 +93,39 @@ class AssembleItineraryTest(unittest.TestCase):
         result = assemble_itinerary.assemble(self.workspace, self.plan_path)
         self.assertEqual(result["planning"]["xhs_comment_research_version"], 1)
 
+    def test_sampling_cities_are_assembled_from_confirmed_route_not_plan_subset(self) -> None:
+        write_json(self.workspace / "manifest.json", {"workspace_version": 1, "xhs_detail_sampling_version": 1})
+        write_json(self.workspace / "selected-route.json", {"id": "route-1", "cities": ["成都", "重庆"]})
+        self.plan["route_proposals"] = [{"id": "route-1", "cities": ["成都"]}]
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(result["route_proposals"][0]["cities"], ["成都", "重庆"])
+        self.assertEqual(json.loads(self.plan_path.read_text())["route_proposals"][0]["cities"], ["成都"])
+
+    def test_sampling_includes_confirmed_route_when_plan_omits_proposals(self) -> None:
+        write_json(self.workspace / "manifest.json", {"workspace_version": 1, "xhs_detail_sampling_version": 1})
+        write_json(self.workspace / "selected-route.json", {"id": "route-1", "name": "双城", "cities": ["成都", "重庆"]})
+        self.plan["route_proposals"] = []
+        write_json(self.plan_path, self.plan)
+        result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+        self.assertEqual(result["route_proposals"], [{"id": "route-1", "name": "双城", "status": "confirmed", "cities": ["成都", "重庆"]}])
+
+    def test_sampling_rejects_confirmed_route_without_city_metadata(self) -> None:
+        write_json(self.workspace / "manifest.json", {"workspace_version": 1, "xhs_detail_sampling_version": 1})
+        with self.assertRaisesRegex(assemble_itinerary.AssemblyError, "cities"):
+            assemble_itinerary.assemble(self.workspace, self.plan_path)
+
+    def test_assembly_copies_canonical_source_mode_and_keeps_sampling_version(self) -> None:
+        write_json(self.workspace / "selected-route.json", {"id": "route-1", "cities": ["杭州"]})
+        for mode in ("optional", "required"):
+            write_json(self.workspace / "manifest.json", {
+                "workspace_version": 1, "xhs_detail_sampling_version": 1, "xhs_research_mode": mode})
+            self.plan["planning"] = {"xhs_research_mode": "required" if mode == "optional" else "optional"}
+            write_json(self.plan_path, self.plan)
+            result = assemble_itinerary.assemble(self.workspace, self.plan_path)
+            self.assertEqual(result["planning"]["xhs_research_mode"], mode)
+            self.assertEqual(result["planning"]["xhs_detail_sampling_version"], 1)
+
     def test_comment_freshness_uses_actual_custom_plan_and_tracks_changes(self) -> None:
         contract = assemble_itinerary.xhs_comment_contract
         failure = {"note_id": "failed", "source_url": "https://www.xiaohongshu.com/explore/failed",

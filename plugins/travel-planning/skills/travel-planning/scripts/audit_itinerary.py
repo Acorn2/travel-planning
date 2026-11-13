@@ -287,7 +287,7 @@ def audit(data: dict[str, Any], workspace: Path | None = None) -> dict[str, Any]
         blocking.append(str(error))
 
     planning = data.get("planning") or {}
-    research_blocking, research_warnings = render_itinerary.research_evidence.audit_research(data)
+    research_blocking, research_warnings = render_itinerary.research_evidence.audit_research(data, workspace)
     blocking.extend(research_blocking)
     warnings.extend(research_warnings)
     community_blocking, community_warnings, community_stats = audit_community_evidence(

@@ -749,6 +749,23 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
         planning["xhs_search_design_version"] = 1
     if manifest_path.exists() and read_json(manifest_path).get("xhs_detail_sampling_version") == 1:
         planning["xhs_detail_sampling_version"] = 1
+        planning["xhs_research_mode"] = research_evidence.xhs_search_contract.research_mode(workspace=workspace)
+    route_proposals = deepcopy(plan.get("route_proposals") or [])
+    if planning.get("xhs_detail_sampling_version") == 1:
+        try:
+            cities = research_evidence.xhs_search_contract.required_destinations(workspace)
+        except ValueError as error:
+            raise AssemblyError(str(error)) from error
+        selected_id = plan["workflow"]["selected_route_id"]
+        matches = [route for route in route_proposals if route.get("id") == selected_id]
+        if len(matches) > 1:
+            raise AssemblyError("已确认路线在 route_proposals 中重复，不能确定逐城验收名单")
+        if not matches:
+            selected = read_json(workspace / "selected-route.json")
+            route_proposals.append({"id": selected_id, "name": selected.get("name") or selected.get("title") or selected_id,
+                                    "status": "confirmed", "cities": cities})
+        else:
+            matches[0]["cities"] = cities
     for meal in planning.get("meal_options") or []:
         if meal.get("mode") == "area":
             try:
@@ -757,7 +774,7 @@ def assemble(workspace: Path, plan_path: Path) -> dict[str, Any]:
                 raise AssemblyError(f"区域餐窗 {meal.get('id') or '未注明'}：{error}") from error
     return {
         "trip": deepcopy(plan["trip"]), "workflow": deepcopy(plan["workflow"]),
-        "route_proposals": deepcopy(plan.get("route_proposals") or []),
+        "route_proposals": route_proposals,
         "planning": planning, "days": days,
         "sources": collect_sources(workspace, plan.get("source_ids")),
         **({"claims": deepcopy(plan["claims"])} if "claims" in plan else {}),

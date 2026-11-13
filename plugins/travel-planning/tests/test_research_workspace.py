@@ -73,6 +73,26 @@ class ResearchWorkspaceTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_route_selection_requires_explicit_cities_without_overwriting_previous_route(self) -> None:
+        previous = (self.workspace / "selected-route.json").read_bytes()
+        manifest = (self.workspace / "manifest.json").read_bytes()
+        route_file = self.root / "invalid-route.json"
+        for cities in (None, [], "成都、重庆", ["成都", None]):
+            write_json(route_file, {"id": "replacement", "cities": cities})
+            with self.subTest(cities=cities), self.assertRaisesRegex(research_workspace.WorkspaceError, "cities"):
+                research_workspace.select_route(Namespace(workspace=str(self.workspace), route_file=str(route_file)))
+            self.assertEqual((self.workspace / "selected-route.json").read_bytes(), previous)
+            self.assertEqual((self.workspace / "manifest.json").read_bytes(), manifest)
+
+    def test_route_selection_normalizes_city_order_without_adding_origin(self) -> None:
+        route_file = self.root / "multi-route.json"
+        write_json(route_file, {"id": "multi-route", "cities": [" 成都 ", "重庆", "成都"],
+                               "city_order": ["北京", "成都", "重庆", "北京"]})
+        research_workspace.select_route(Namespace(workspace=str(self.workspace), route_file=str(route_file)))
+        selected = json.loads((self.workspace / "selected-route.json").read_text())
+        self.assertEqual(selected["cities"], ["成都", "重庆"])
+        self.assertEqual(selected["city_order"], ["北京", "成都", "重庆", "北京"])
+
     def test_assignment_submission_and_merge(self) -> None:
         assignment = research_workspace.assign(
             Namespace(
@@ -276,6 +296,16 @@ class ResearchWorkspaceTest(unittest.TestCase):
         self.assertEqual(context["food_themes"], [])
         manifest = json.loads((self.workspace / "manifest.json").read_text(encoding="utf-8"))
         self.assertIn("route-context.json", manifest["write_ownership"]["main_agent"])
+        self.assertEqual(manifest["xhs_research_mode"], "optional")
+
+    def test_explicit_required_mode_can_be_selected_during_creation(self) -> None:
+        args = research_workspace.build_parser().parse_args([
+            "init", "--root", str(self.root), "--trip-id", "required-xhs",
+            "--destination", "杭州", "--date-range", "2026-11-13", "--travelers", "2",
+            "--xhs-mode", "required"])
+        created = research_workspace.init_workspace(args)
+        manifest = json.loads((Path(created["workspace"]) / "manifest.json").read_text())
+        self.assertEqual(manifest["xhs_research_mode"], "required")
 
     def test_provider_snapshot_is_stored_bound_submitted_and_merged(self) -> None:
         assignment = research_workspace.assign(

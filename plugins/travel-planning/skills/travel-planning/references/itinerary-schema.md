@@ -60,7 +60,7 @@
 
 - 必填字段为 `trip.title`、`days[]`、`day.date`、`day.events[]`、`event.id`、`event.time`、`event.type` 和 `event.title`。`confirmed_planning` 与 `final` 阶段的事件 ID 必须唯一。
 - `workflow.phase` 使用 `proposal`、`awaiting_confirmation`、`confirmed_planning` 或 `final`。路线未确认时不得生成标记为 `final` 的完整日程。
-- `route_proposals[]` 保存路线候选与状态；深度调研只能使用 `selected_route_id` 指向的已确认方案。
+- `route_proposals[]` 保存路线候选与状态；深度调研只能使用 `selected_route_id` 指向的已确认方案。启用 `xhs_detail_sampling_version=1` 时，该项含 `cities[]` 完整城市名单，由装配器从工作区 `selected-route.json` 导入。planning.xhs_research_mode 同步工作区的 optional/required；正式引用小红书或 required 模式才在 final 检查每城15篇、吃/玩各5篇，并比较当前确认路线。optional 未引用时不要求数量配额，仍校验查询、降级理由及已读评论；不能单改模式或删版本绕过检查。
 - 详细规划提供 `planning.attractions[]`、`planning.transport_edges[]` 和 `planning.readiness[]`；跨城旅行还要提供 `planning.intercity_options[]`。行前检查不适用项使用 `not_applicable`，不得留空。
 - 日期尽量使用 ISO 格式；事件时间使用目的地当地时间。跨时区航班同时保存当地出发、到达日期和时区。
 - 事件类型只允许 `attraction`、`transport`、`meal`、`lodging`、`rest` 或 `note`。
